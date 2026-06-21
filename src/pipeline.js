@@ -8,6 +8,7 @@
 import { existsSync, writeFileSync, rmSync } from 'node:fs';
 import { run, query, status, gitDir } from './git.js';
 import { buildMailmap } from './config.js';
+import { parseBranchRefs, resolveBranchSet, parseIdentities } from './team.js';
 
 const noop = () => {};
 const defaultUi = { step: noop, info: noop, ok: noop, warn: noop, spinner: () => ({ start() { return this; }, succeed() { return this; }, fail() { return this; }, stop() { return this; } }) };
@@ -49,27 +50,54 @@ export async function buildStaging(cfg, ui = defaultUi) {
   sp.succeed('Staging copy ready');
 }
 
-/** Are any of the old emails still present anywhere in the staging history? */
-export function oldEmailsPresent(cfg) {
+/** Are any of the given emails still present anywhere in the staging history (author or committer)? */
+export function emailsPresent(cfg, emails) {
+  if (!emails || !emails.length) return false;
   const out = query('git', [...gitDir(cfg.stagingMirror), 'log', '--all', '--format=%ae%n%ce']) || '';
   const have = new Set(out.split('\n').map((s) => s.trim().toLowerCase()).filter(Boolean));
-  return cfg.allOldEmails.some((e) => have.has(String(e).toLowerCase()));
+  return emails.some((e) => have.has(String(e).toLowerCase()));
 }
 
-/** Step 3 — write the mailmap and rewrite history (skipped if no old email remains). */
+/** Back-compat helper: are any of the personal-mode old emails present? */
+export const oldEmailsPresent = (cfg) => emailsPresent(cfg, cfg.allOldEmails);
+
+/**
+ * Step 3 — write the effective mailmap and rewrite history. Works for both modes:
+ * personal (single identity) and team (multi-developer mailmap). Skips only when we
+ * can prove there's nothing to do; the rewrite itself is deterministic either way.
+ */
 export async function rewriteHistory(cfg, ui = defaultUi) {
-  writeFileSync(cfg.mailmapFile, buildMailmap(cfg.newName, cfg.newEmail, cfg.allOldEmails));
-  if (!oldEmailsPresent(cfg)) {
-    ui.ok('No matching old email in history — already rewritten, skipping.');
+  const text = cfg.mailmapText ?? buildMailmap(cfg.newName, cfg.newEmail, cfg.allOldEmails);
+  writeFileSync(cfg.mailmapFile, text);
+  if (!text.trim()) {
+    ui.ok('No identity mappings provided — skipping rewrite.');
+    return { rewritten: false };
+  }
+  const emails = cfg.rewriteEmails ?? cfg.allOldEmails ?? [];
+  const hasNameOnly = !!cfg.hasNameOnlyMapping;
+  if (!emailsPresent(cfg, emails) && !hasNameOnly) {
+    ui.ok('No matching identities in history — already rewritten, skipping.');
     return { rewritten: false };
   }
   const sp = ui.spinner('Rewriting author/committer identities via git-filter-repo').start();
   await run('git', [...gitDir(cfg.stagingMirror), 'filter-repo', '--mailmap', cfg.mailmapFile, '--force'], { env: cfg.gitEnv });
   sp.succeed('History rewritten');
-  if (oldEmailsPresent(cfg)) {
-    throw new Error('Safety check failed: an old email still remains in history after the rewrite. Aborting before push.');
+  if (emails.length && emailsPresent(cfg, emails)) {
+    throw new Error('Safety check failed: a mapped old email still remains in history after the rewrite. Aborting before push.');
   }
   return { rewritten: true };
+}
+
+/** Enumerate the branches present in the staging mirror. */
+export function listBranches(cfg) {
+  const out = query('git', [...gitDir(cfg.stagingMirror), 'for-each-ref', '--format=%(refname:short)', 'refs/heads/']) || '';
+  return parseBranchRefs(out);
+}
+
+/** Enumerate the unique author identities across all refs of a mirror (defaults to source). */
+export function listAuthors(cfg, dir = cfg.sourceMirror) {
+  const out = query('git', [...gitDir(dir), 'log', '--all', '--pretty=format:%aN|%aE']) || '';
+  return parseIdentities(out);
 }
 
 /** Step 4 — push one branch using the only safe strategy for its remote relationship. */
@@ -114,9 +142,9 @@ export async function pushBranch(cfg, branch, ui = defaultUi) {
 }
 
 /** Step 5 — confirm each branch's remote tip matches local where we pushed. */
-export function verify(cfg) {
+export function verify(cfg, branches = cfg.branches) {
   const gd = gitDir(cfg.stagingMirror);
-  return cfg.branches.map((branch) => {
+  return branches.map((branch) => {
     const localSha = query('git', [...gd, 'rev-parse', `refs/heads/${branch}`]);
     if (!localSha) return { branch, status: 'missing-local' };
     const ls = query('git', [...gd, 'ls-remote', cfg.githubSsh, `refs/heads/${branch}`], { env: cfg.gitEnv });
@@ -130,7 +158,13 @@ export async function migrate(cfg, ui = defaultUi) {
   const sync = await syncSourceMirror(cfg, ui);
   await buildStaging(cfg, ui);
   const rewrite = await rewriteHistory(cfg, ui);
+  // Resolve the branch set after the mirror exists so --all-branches can enumerate them.
+  const branches = resolveBranchSet({
+    allBranches: !!cfg.allBranches,
+    available: listBranches(cfg),
+    explicit: cfg.branches,
+  });
   const pushes = [];
-  for (const branch of cfg.branches) pushes.push(await pushBranch(cfg, branch, ui));
-  return { mode: sync.mode, rewrite, pushes, verification: verify(cfg) };
+  for (const branch of branches) pushes.push(await pushBranch(cfg, branch, ui));
+  return { mode: sync.mode, rewrite, branches, pushes, verification: verify(cfg, branches) };
 }

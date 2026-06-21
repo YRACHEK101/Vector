@@ -2,9 +2,27 @@
 // config.js — pure configuration logic (no prompts, no side effects, no deps).
 // Everything here is unit-tested.
 // ─────────────────────────────────────────────────────────────────────────────
+import { resolveMailmapEntries } from './team.js';
 
 export const DEFAULT_BRANCHES = ['master', 'main'];
 export const REQUIRED = ['azureUrl', 'githubSsh', 'oldEmail', 'newName', 'newEmail'];
+
+/** Interpret an env flag as boolean: "1"/"true"/"yes"/"on" → true; "0"/""/unset → false. */
+export function parseBool(v) {
+  if (v === true) return true;
+  if (v == null) return false;
+  return /^(1|true|yes|on)$/i.test(String(v).trim());
+}
+
+/** Split an env-provided map list (newline-separated, or comma when single-line). */
+export function parseMapsEnv(raw) {
+  if (!raw) return [];
+  let parts = String(raw).split(/\r?\n/).map((s) => s.trim()).filter(Boolean);
+  if (parts.length <= 1 && (String(raw).match(/=/g) || []).length > 1) {
+    parts = String(raw).split(',').map((s) => s.trim()).filter(Boolean);
+  }
+  return parts;
+}
 
 /** Derive a local folder slug from a GitHub SSH URL: git@github.com:USER/REPO.git → REPO */
 export function deriveProjectSlug(githubSsh = '') {
@@ -46,6 +64,11 @@ export function configFromEnv(env = process.env) {
     branches: env.PUSH_BRANCHES ? parseBranches(env.PUSH_BRANCHES) : [],
     sshKey: env.SSH_KEY || '',
     force: false,
+    // Team Migration mode
+    teamMode: parseBool(env.TEAM_MODE),
+    mailmapPath: env.MAILMAP || '',
+    maps: parseMapsEnv(env.MAPS),
+    allBranches: parseBool(env.ALL_BRANCHES),
   };
 }
 
@@ -93,6 +116,28 @@ export function finalizeConfig(cfg, { cwd = process.cwd() } = {}) {
       ? `ssh -i ${sshKey} -o BatchMode=yes -o IdentitiesOnly=yes`
       : 'ssh -o BatchMode=yes',
   };
+
+  // Resolve the mailmap + the set of emails that must disappear after the rewrite.
+  // Team mode: a supplied mailmap (file/inline) drives a multi-developer rewrite.
+  // Personal mode: build the single-identity mailmap from new* + allOldEmails.
+  let mailmapText;
+  let rewriteEmails;
+  let hasNameOnlyMapping;
+  const hasTeamSources = cfg.teamMode || (cfg.mailmapText && cfg.mailmapText.trim()) || (cfg.maps && cfg.maps.length);
+  if (hasTeamSources) {
+    const resolved = resolveMailmapEntries({
+      fileText: cfg.mailmapText || '',
+      mapStrings: cfg.maps || [],
+    });
+    mailmapText = resolved.text;
+    rewriteEmails = resolved.rewriteEmails;
+    hasNameOnlyMapping = resolved.hasNameOnly;
+  } else {
+    mailmapText = buildMailmap(cfg.newName, cfg.newEmail, allOldEmails);
+    rewriteEmails = allOldEmails;
+    hasNameOnlyMapping = false;
+  }
+
   return {
     ...cfg,
     project,
@@ -100,6 +145,11 @@ export function finalizeConfig(cfg, { cwd = process.cwd() } = {}) {
     allOldEmails,
     sshKey,
     force: !!cfg.force,
+    teamMode: !!cfg.teamMode,
+    allBranches: !!cfg.allBranches,
+    mailmapText,
+    rewriteEmails,
+    hasNameOnlyMapping,
     gitEnv,
     sourceMirror: `${cwd}/${project}-source.git`,
     stagingMirror: `${cwd}/${project}-migration.git`,

@@ -38,3 +38,58 @@ export async function runWizard(initial = {}) {
     { type: 'input', name: 'branches', message: 'Branches to synchronize (space/comma separated):', default: branchDefault },
   ]);
 }
+
+async function loadInquirer() {
+  try {
+    return (await import('inquirer')).default;
+  } catch {
+    throw new Error(
+      'The interactive wizard needs "inquirer". Install dependencies (npm install) or run ' +
+      'non-interactively with --mailmap/--map (team mode) or flags/env (personal mode).',
+    );
+  }
+}
+
+/** Team mode: prompt only for the source/destination/slug (identities come from mapping). */
+export async function runTeamBaseWizard(initial = {}) {
+  const inquirer = await loadInquirer();
+  return inquirer.prompt([
+    { type: 'input', name: 'azureUrl', message: 'Azure DevOps repository clone URL:', default: initial.azureUrl || undefined, validate: required },
+    { type: 'input', name: 'githubSsh', message: 'Target GitHub repo (SSH, git@github.com:USER/REPO.git):', default: initial.githubSsh || undefined, validate: required },
+    { type: 'input', name: 'project', message: 'Local project slug (folder names):', default: (a) => initial.project || deriveProjectSlug(a.githubSsh) || 'repo' },
+  ]);
+}
+
+/**
+ * Team mode: given detected author identities, ask the operator to map each one
+ * to a new "Name <email>" target — or leave it blank to keep it unchanged.
+ * @returns {Promise<Array<{name:string,email:string,sourceEmail:string}>>}
+ */
+export async function runTeamWizard(identities = []) {
+  const inquirer = await loadInquirer();
+  const entries = [];
+  for (const id of identities) {
+    const { mapping } = await inquirer.prompt([{
+      type: 'input',
+      name: 'mapping',
+      message: `Map  ${id.name} <${id.email}>  →  (blank = leave unchanged) "New Name <new@email>":`,
+      validate: (v) => {
+        const s = String(v ?? '').trim();
+        if (!s) return true; // skip
+        return /^.+\s*<[^\s@<>]+@[^\s@<>]+>\s*$/.test(s) ? true : 'Enter "New Name <new@email>" or leave blank.';
+      },
+    }]);
+    const s = String(mapping ?? '').trim();
+    if (!s) continue;
+    const m = s.match(/^(.+?)\s*<([^>]+)>\s*$/);
+    entries.push({ name: m[1].trim(), email: m[2].trim(), sourceEmail: id.email });
+  }
+  return entries;
+}
+
+/** Yes/no confirmation (team mode rewrites teammates, so we confirm first). */
+export async function confirmProceed(message = 'Proceed?') {
+  const inquirer = await loadInquirer();
+  const { ok } = await inquirer.prompt([{ type: 'confirm', name: 'ok', message, default: false }]);
+  return ok;
+}
