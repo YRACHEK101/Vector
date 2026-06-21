@@ -135,29 +135,66 @@ before the next begins:
    `github.com`'s host key, polls `https://github.com/<USER>.keys` until the key
    is live on the **right** account, and confirms `ssh -T git@github.com`.
 
-2. **Bare mirror clone.** `git clone --mirror` pulls the complete object graph —
-   every branch, tag, and note — into a local `*-migration.git`. The mirror is
-   reused on re-runs, so an interrupted migration resumes instead of restarting.
+2. **Pristine source mirror.** `git clone --mirror` pulls the complete object
+   graph — every branch, tag, and note — into a local `*-source.git`. This mirror
+   tracks Azure and is the **only** repo Vector ever fetches into; it is never
+   rewritten, so re-fetching can add new commits but can never corrupt it. On
+   later runs Vector simply fetches the new commits instead of re-cloning.
 
-3. **Mailmap rewriting.** A `mailmap` is generated from your old email(s) and
+3. **Isolated rewrite staging.** A disposable `*-migration.git` is rebuilt from
+   the source on every run (`--no-hardlinks`, so it can never reach back and touch
+   the source's objects). Because `git filter-repo` is **deterministic** — the
+   same commits plus the same mailmap always yield the same SHAs — previously
+   migrated commits keep identical hashes across runs.
+
+4. **Mailmap rewriting.** A `mailmap` is generated from your old email(s) and
    applied with `git filter-repo --mailmap`. This rewrites the **author,
    committer, and tagger** fields across all refs — and *only* for the emails you
    listed, leaving collaborators' commits intact. The step is skipped entirely if
    no matching email remains, and a safety gate aborts the run if any of your old
    emails survive the rewrite.
 
-4. **Dedicated SSH streaming push.** Each requested branch is pushed over a single
-   persistent SSH connection — sidestepping the macOS HTTPS hang at
-   `Writing objects: 100%`. Vector compares remote and local tips first: it skips
-   branches already in sync, pushes missing ones outright, and asks before
-   force-pushing any that diverge.
+5. **Ancestry-aware SSH push.** Each branch is pushed over a single persistent SSH
+   connection — sidestepping the macOS HTTPS hang at `Writing objects: 100%`.
+   Vector inspects the relationship between the remote tip and the local tip and
+   picks the only safe action: it **creates** a missing branch, **skips** one
+   already in sync, **fast-forwards** when the remote is strictly behind (the
+   normal incremental case — no force needed), **skips** when the remote is *ahead*
+   (never overwriting commits that exist only on GitHub), and only when histories
+   have genuinely **diverged** does it ask before force-pushing.
 
-5. **Verification.** After pushing, Vector re-reads each remote tip and confirms
+6. **Verification.** After pushing, Vector re-reads each remote tip and confirms
    it matches the local SHA (with a commit count) before reporting success.
 
 > **Why SSH, not HTTPS?** On macOS, HTTPS pushes reliably freeze at
 > `Writing objects: 100%` — the client waiting on a server acknowledgment, not a
 > slow upload. A single SSH stream avoids the stall and keeps secrets off disk.
+
+---
+
+## Incremental syncs (re-running Vector)
+
+Migration is rarely a one-shot event — work keeps landing on Azure after the
+first push. Vector is built to be **re-run as many times as you like**:
+
+```bash
+./migrate.sh   # same config — run it again whenever Azure has new commits
+```
+
+Each re-run:
+
+1. **Fetches only the new commits** from Azure into the pristine `*-source.git`
+   mirror — never re-cloning, never corrupting what's already there.
+2. **Re-applies the mailmap deterministically**, so already-migrated commits keep
+   the exact same SHAs they had on GitHub.
+3. **Fast-forwards** just the new commits onto GitHub. Existing history is left
+   byte-for-byte intact.
+4. **Never overwrites** GitHub. If the remote is ahead, or histories have truly
+   diverged, Vector stops and tells you — it only force-pushes a genuine
+   divergence after you explicitly confirm.
+
+Keep the `*-source.git` mirror between runs to make subsequent syncs fast. The
+`*-migration.git` staging copy is disposable and rebuilt automatically.
 
 ---
 

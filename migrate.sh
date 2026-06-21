@@ -9,6 +9,11 @@
 # on macOS; a single persistent SSH stream avoids that. The run is idempotent and
 # safe to re-run: it skips work already done and never force-pushes without asking.
 #
+# Incremental syncs: re-run it whenever new commits land on Azure. Vector keeps a
+# pristine source mirror that it re-fetches (never rewriting it, so it can't be
+# corrupted), rebuilds a deterministic rewritten copy, and fast-forwards only the
+# new commits to GitHub — existing GitHub history is preserved untouched.
+#
 # Configuration is resolved in this order (first match wins):
 #   1. command-line flags        ./migrate.sh --new-name octocat --branch main
 #   2. environment variables     NEW_NAME=octocat ./migrate.sh
@@ -70,8 +75,13 @@ confirm() {
   local r; read -r -p "$1 [y/N] " r; [[ "$r" =~ ^[Yy]$ ]]
 }
 
-# git_mirror ... — run git inside the bare mirror, quoting-safe for paths.
-git_mirror() { git -C "$MIRROR_DIR" "$@"; }
+# Run git against the bare repos we create. We pass an explicit --git-dir (which
+# is required when the environment sets safe.bareRepository=explicit) and trust
+# these specific repos via -c safe.bareRepository=all. The -c also propagates to
+# git-filter-repo's child git processes. We created these mirrors ourselves, so
+# trusting them — and only them — is correct and is a no-op on normal setups.
+git_mirror() { git -c safe.bareRepository=all --git-dir="$MIRROR_DIR" "$@"; }
+git_source() { git -c safe.bareRepository=all --git-dir="$SOURCE_MIRROR" "$@"; }
 
 # ──────────────────────────────────────────────────────────────────────────────
 #  Usage
@@ -193,6 +203,9 @@ if [[ -n "$EXTRA_OLD_EMAILS" ]]; then
 fi
 
 # Derived, internal paths.
+#   SOURCE_MIRROR — pristine mirror of Azure; fetched into, never rewritten.
+#   MIRROR_DIR    — disposable rewritten copy, rebuilt from the source each run.
+SOURCE_MIRROR="$(pwd)/${PROJECT}-source.git"
 MIRROR_DIR="$(pwd)/${PROJECT}-migration.git"
 MAILMAP_FILE="$(pwd)/${PROJECT}-mailmap.txt"
 
@@ -202,7 +215,9 @@ printf '  %-14s %s\n' "GitHub SSH:"  "$GITHUB_SSH"
 printf '  %-14s %s\n' "Identity:"    "$NEW_NAME <$NEW_EMAIL>"
 printf '  %-14s %s\n' "Remap from:"  "${ALL_OLD[*]}"
 printf '  %-14s %s\n' "Branches:"    "${BRANCHES[*]}"
-printf '  %-14s %s\n' "Mirror dir:"  "$MIRROR_DIR"
+printf '  %-14s %s\n' "Source dir:"  "$SOURCE_MIRROR"
+printf '  %-14s %s\n' "Staging dir:" "$MIRROR_DIR"
+[[ -d "$SOURCE_MIRROR" ]] && green "Existing source mirror detected — this will be an incremental sync."
 confirm "Proceed with this configuration?" || die "Aborted by user."
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -311,13 +326,28 @@ else
 fi
 
 # ──────────────────────────────────────────────────────────────────────────────
-#  2. Bare mirror clone from Azure DevOps (reused if present)
+#  2. Sync the pristine source mirror, then build the rewrite staging copy
 # ──────────────────────────────────────────────────────────────────────────────
-step "Bare mirror from Azure DevOps"
-if [[ -d "$MIRROR_DIR" ]]; then
-  green "Reusing existing mirror: $MIRROR_DIR"
+# SOURCE_MIRROR is the only repo we ever fetch into; it is never rewritten, so a
+# re-fetch can add new commits but can never corrupt it. On the first run it is a
+# fresh mirror clone; on every later run we just fetch the new commits from Azure.
+step "Syncing pristine source mirror from Azure DevOps"
+if [[ -d "$SOURCE_MIRROR" ]]; then
+  green "Fetching new commits into existing source mirror: $SOURCE_MIRROR"
+  git_source remote set-url origin "$AZURE_URL" 2>/dev/null || true
+  if ! git_source remote update origin; then
+    cat >&2 <<EOF
+
+── could not fetch updates from Azure ──────────────────────────────────────────
+  • Verify access:               git --git-dir="$SOURCE_MIRROR" ls-remote origin
+  • Azure DevOps over HTTPS needs a PAT or Git Credential Manager.
+  • The existing source mirror was left intact — nothing was lost. Re-run after
+    fixing access; this fetch is the only step that touches the source.
+EOF
+    die "Source fetch failed (see above)."
+  fi
 else
-  if ! git clone --mirror "$AZURE_URL" "$MIRROR_DIR"; then
+  if ! git clone --mirror "$AZURE_URL" "$SOURCE_MIRROR"; then
     cat >&2 <<EOF
 
 ── could not mirror-clone the Azure repository ─────────────────────────────────
@@ -328,8 +358,21 @@ else
 EOF
     die "Mirror clone failed (see above)."
   fi
-  green "Mirror cloned: $MIRROR_DIR"
 fi
+green "Source mirror ready: $SOURCE_MIRROR"
+
+# MIRROR_DIR is a disposable, fully-isolated copy that we rewrite and push. We
+# rebuild it from the pristine source on every run. --no-hardlinks guarantees the
+# rewrite can never reach back and touch the source's objects. Because
+# git-filter-repo is deterministic (same commits + same mailmap ⇒ same SHAs),
+# already-migrated commits keep identical hashes across runs, so the GitHub push
+# stays a clean fast-forward of only the genuinely new commits.
+step "Building isolated rewrite staging copy"
+rm -rf "$MIRROR_DIR"
+if ! git clone --mirror --no-hardlinks "$SOURCE_MIRROR" "$MIRROR_DIR"; then
+  die "Could not build staging copy from $SOURCE_MIRROR"
+fi
+green "Staging copy ready: $MIRROR_DIR"
 
 # ──────────────────────────────────────────────────────────────────────────────
 #  3. Show identities, then rewrite YOUR old email(s) — idempotent
@@ -421,35 +464,73 @@ EOF
   fi
 }
 
-push_branches() {
-  step "Pushing branch(es) to GitHub over SSH: ${BRANCHES[*]}"
-  local b local_sha remote_sha
-  for b in "${BRANCHES[@]}"; do
-    local_sha="$(git_mirror rev-parse "refs/heads/$b" 2>/dev/null || true)"
-    if [[ -z "$local_sha" ]]; then yellow "[$b] not found in mirror — skipping."; continue; fi
-    remote_sha="$(git ls-remote "$GITHUB_SSH" "refs/heads/$b" 2>/dev/null | awk '{print $1}')"
+# push_one BRANCH — push a single branch, choosing the safe strategy:
+#   • remote missing      → create it (plain push)
+#   • remote == local     → nothing to do
+#   • remote is ancestor  → fast-forward (plain push, NO --force) — incremental case
+#   • local is ancestor   → remote is AHEAD; skip, never overwrite
+#   • neither (divergent) → the ONLY case where --force is even offered, and only
+#                           after explicit confirmation
+push_one() {
+  local b="$1" local_sha remote_sha ahead behind
+  local_sha="$(git_mirror rev-parse "refs/heads/$b" 2>/dev/null || true)"
+  if [[ -z "$local_sha" ]]; then yellow "[$b] not found in source — skipping."; return; fi
 
-    if [[ "$remote_sha" == "$local_sha" ]]; then
-      green "[$b] already on GitHub at $local_sha — nothing to push."
-    elif [[ -z "$remote_sha" ]]; then
-      if git_mirror push "$GITHUB_SSH" "refs/heads/$b:refs/heads/$b"; then
-        green "[$b] pushed."
+  remote_sha="$(git ls-remote "$GITHUB_SSH" "refs/heads/$b" 2>/dev/null | awk '{print $1}')"
+
+  if [[ -z "$remote_sha" ]]; then
+    if git_mirror push "$GITHUB_SSH" "refs/heads/$b:refs/heads/$b"; then
+      green "[$b] created on GitHub (new branch)."
+    else
+      diagnose_push_failure "$b"; die "Push of '$b' failed."
+    fi
+    return
+  fi
+
+  if [[ "$remote_sha" == "$local_sha" ]]; then
+    green "[$b] already up to date at $local_sha — nothing to push."
+    return
+  fi
+
+  # Remote and local differ. Bring the remote tip into a private scratch ref so we
+  # can judge ancestry locally and never guess about divergence.
+  if ! git_mirror fetch --quiet "$GITHUB_SSH" "+refs/heads/$b:refs/vector/remote/$b" 2>/dev/null; then
+    diagnose_push_failure "$b"; die "Could not fetch remote '$b' for comparison."
+  fi
+
+  if git_mirror merge-base --is-ancestor "$remote_sha" "$local_sha"; then
+    # Remote is strictly behind local → safe fast-forward, no --force.
+    ahead="$(git_mirror rev-list --count "$remote_sha..$local_sha")"
+    if git_mirror push "$GITHUB_SSH" "refs/heads/$b:refs/heads/$b"; then
+      green "[$b] fast-forwarded (+$ahead new commit(s)) — existing history preserved."
+    else
+      diagnose_push_failure "$b"; die "Fast-forward push of '$b' failed."
+    fi
+  elif git_mirror merge-base --is-ancestor "$local_sha" "$remote_sha"; then
+    # Remote already contains everything local has, and more → do NOT overwrite.
+    behind="$(git_mirror rev-list --count "$local_sha..$remote_sha")"
+    yellow "[$b] remote is AHEAD by $behind commit(s) — skipping to protect GitHub history."
+    yellow "      GitHub has commits the migration does not. Reconcile manually if intended."
+  else
+    # Genuinely divergent histories — the only situation where force is an option.
+    yellow "[$b] histories DIVERGED — remote=$remote_sha local=$local_sha."
+    yellow "      A force-push here would OVERWRITE commits that exist only on GitHub."
+    if confirm "Force-push and overwrite the diverged remote '$b'?"; then
+      if git_mirror push --force "$GITHUB_SSH" "refs/heads/$b:refs/heads/$b"; then
+        green "[$b] force-pushed (divergence resolved by your confirmation)."
       else
-        diagnose_push_failure "$b"; die "Push of '$b' failed."
+        diagnose_push_failure "$b"; die "Force-push of '$b' failed."
       fi
     else
-      yellow "[$b] remote=$remote_sha differs from local=$local_sha."
-      if confirm "Force-push to overwrite remote '$b'?"; then
-        if git_mirror push --force "$GITHUB_SSH" "refs/heads/$b:refs/heads/$b"; then
-          green "[$b] force-pushed."
-        else
-          diagnose_push_failure "$b"; die "Force-push of '$b' failed."
-        fi
-      else
-        yellow "[$b] skipped (remote left as-is)."
-      fi
+      yellow "[$b] skipped (remote left untouched)."
     fi
-  done
+  fi
+}
+
+push_branches() {
+  step "Pushing branch(es) to GitHub over SSH: ${BRANCHES[*]}"
+  local b
+  for b in "${BRANCHES[@]}"; do push_one "$b"; done
 }
 push_branches
 
@@ -466,8 +547,12 @@ verify_remote() {
     n="$(git_mirror rev-list --count "refs/heads/$b")"
     if [[ "$remote_sha" == "$local_sha" ]]; then
       green "[$b] OK — remote == local ($local_sha, $n commits)"
+    elif [[ -z "$remote_sha" ]]; then
+      yellow "[$b] not present on remote (push was skipped or declined)."
     else
-      die "[$b] MISMATCH — local=$local_sha remote=${remote_sha:-<none>}"
+      # A difference here is expected and non-destructive: the remote was ahead,
+      # or a divergence force-push was declined. We left GitHub untouched on purpose.
+      yellow "[$b] remote ($remote_sha) intentionally left untouched (remote ahead or divergence declined)."
     fi
   done
 }
@@ -481,6 +566,14 @@ Next steps:
   • Set the default branch on GitHub if needed (Settings → Branches).
   • Your commits appear on the contribution graph at their ORIGINAL dates.
 
-Cleanup when satisfied:
-  rm -rf "$MIRROR_DIR" "$MAILMAP_FILE"
+Incremental syncs:
+  • Just re-run this script whenever new commits land on Azure. Vector fetches
+    only the new commits and fast-forwards them to GitHub — nothing is overwritten.
+
+Cleanup:
+  • KEEP "$SOURCE_MIRROR" to make future incremental syncs fast.
+  • The staging copy and mailmap are disposable — safe to delete any time:
+        rm -rf "$MIRROR_DIR" "$MAILMAP_FILE"
+  • To start over from scratch, also remove the source mirror:
+        rm -rf "$SOURCE_MIRROR"
 DONE
