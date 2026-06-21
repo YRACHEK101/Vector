@@ -1,93 +1,99 @@
 // ─────────────────────────────────────────────────────────────────────────────
-// wizard.js — the interactive prompt flow (inquirer is lazy-imported, so the rest
-// of the CLI works even when only non-interactive paths are used).
+// wizard.js — interactive prompts for the unified flow (inquirer is lazy-imported
+// so non-interactive paths work without it).
+//   • runBaseWizard    — source URL, destination, slug
+//   • runMappingWizard — "you → new identity" by default, edit to remap teammates
+//   • confirmProceed   — the confirm gate before rewriting
 // ─────────────────────────────────────────────────────────────────────────────
 import { deriveProjectSlug } from './config.js';
 import { query } from './git.js';
+import { resolveYou, defaultNewIdentity, buildIdentityEntries } from './team.js';
 
 const required = (v) => (String(v ?? '').trim() ? true : 'This value is required.');
-
-/**
- * Prompt the user for any configuration, pre-filling answers from `initial`
- * (env vars / flags) and smart git/derived defaults.
- * @returns {Promise<object>} camelCase config (branches/extraOldEmails as strings)
- */
-export async function runWizard(initial = {}) {
-  let inquirer;
-  try {
-    ({ default: inquirer } = await import('inquirer'));
-  } catch {
-    throw new Error(
-      'The interactive wizard needs "inquirer". Install dependencies (npm install) or run ' +
-      'non-interactively by passing --azure-url/--github-ssh/... flags or environment variables.',
-    );
-  }
-
-  const gitName = query('git', ['config', '--global', 'user.name']) || '';
-  const gitEmail = query('git', ['config', '--global', 'user.email']) || '';
-  const branchDefault = initial.branches?.length ? initial.branches.join(' ') : 'master main';
-
-  return inquirer.prompt([
-    { type: 'input', name: 'azureUrl', message: 'Azure DevOps repository clone URL:', default: initial.azureUrl || undefined, validate: required },
-    { type: 'input', name: 'githubSsh', message: 'Target GitHub repo (SSH, git@github.com:USER/REPO.git):', default: initial.githubSsh || undefined, validate: required },
-    { type: 'input', name: 'project', message: 'Local project slug (folder names):', default: (a) => initial.project || deriveProjectSlug(a.githubSsh) || 'repo' },
-    { type: 'input', name: 'oldEmail', message: 'Old corporate email used in the Azure commits:', default: initial.oldEmail || undefined, validate: required },
-    { type: 'input', name: 'extraOldEmails', message: 'Additional OLD emails of yours (comma-separated, optional):', default: (initial.extraOldEmails || []).join(', ') || undefined },
-    { type: 'input', name: 'newName', message: 'New author name / GitHub username:', default: initial.newName || gitName || undefined, validate: required },
-    { type: 'input', name: 'newEmail', message: 'New personal (GitHub-verified) email:', default: initial.newEmail || gitEmail || undefined, validate: required },
-    { type: 'input', name: 'branches', message: 'Branches to synchronize (space/comma separated):', default: branchDefault },
-  ]);
-}
+const requiredEmail = (v) => (/^[^\s@<>]+@[^\s@<>]+$/.test(String(v ?? '').trim()) ? true : 'Enter a valid email address.');
+const targetOrBlank = (v) => {
+  const s = String(v ?? '').trim();
+  if (!s) return true; // blank = keep unchanged
+  return /^.+\s*<[^\s@<>]+@[^\s@<>]+>\s*$/.test(s) ? true : 'Enter "New Name <new@email>" or leave blank to keep.';
+};
 
 async function loadInquirer() {
   try {
     return (await import('inquirer')).default;
   } catch {
     throw new Error(
-      'The interactive wizard needs "inquirer". Install dependencies (npm install) or run ' +
-      'non-interactively with --mailmap/--map (team mode) or flags/env (personal mode).',
+      'The interactive prompts need "inquirer". Install dependencies (npm install) or run ' +
+      'non-interactively with --azure-url/--github-ssh plus a mapping (--mailmap/--map/--old-email…).',
     );
   }
 }
 
-/** Team mode: prompt only for the source/destination/slug (identities come from mapping). */
-export async function runTeamBaseWizard(initial = {}) {
+/** Steps 1–2: the Azure source, the GitHub destination, and a local slug. */
+export async function runBaseWizard(initial = {}) {
   const inquirer = await loadInquirer();
   return inquirer.prompt([
-    { type: 'input', name: 'azureUrl', message: 'Azure DevOps repository clone URL:', default: initial.azureUrl || undefined, validate: required },
-    { type: 'input', name: 'githubSsh', message: 'Target GitHub repo (SSH, git@github.com:USER/REPO.git):', default: initial.githubSsh || undefined, validate: required },
+    { type: 'input', name: 'azureUrl', message: 'Azure DevOps repository URL:', default: initial.azureUrl || undefined, validate: required },
+    { type: 'input', name: 'githubSsh', message: 'GitHub destination (SSH, git@github.com:USER/REPO.git):', default: initial.githubSsh || undefined, validate: required },
     { type: 'input', name: 'project', message: 'Local project slug (folder names):', default: (a) => initial.project || deriveProjectSlug(a.githubSsh) || 'repo' },
   ]);
 }
 
 /**
- * Team mode: given detected author identities, ask the operator to map each one
- * to a new "Name <email>" target — or leave it blank to keep it unchanged.
- * @returns {Promise<Array<{name:string,email:string,sourceEmail:string}>>}
+ * Step 5: map identities. Default = map YOU (matched by global git email, else
+ * picked) to your new identity, keep everyone else. Operator may opt to remap
+ * teammates too. Returns mailmap entries.
  */
-export async function runTeamWizard(identities = []) {
+export async function runMappingWizard(identities = []) {
   const inquirer = await loadInquirer();
-  const entries = [];
-  for (const id of identities) {
-    const { mapping } = await inquirer.prompt([{
-      type: 'input',
-      name: 'mapping',
-      message: `Map  ${id.name} <${id.email}>  →  (blank = leave unchanged) "New Name <new@email>":`,
-      validate: (v) => {
-        const s = String(v ?? '').trim();
-        if (!s) return true; // skip
-        return /^.+\s*<[^\s@<>]+@[^\s@<>]+>\s*$/.test(s) ? true : 'Enter "New Name <new@email>" or leave blank.';
-      },
+  const gitName = query('git', ['config', '--global', 'user.name']) || '';
+  const gitEmail = query('git', ['config', '--global', 'user.email']) || '';
+
+  // Your new identity (defaults from global git config — usually your GitHub identity).
+  const def = defaultNewIdentity({ gitName, gitEmail }) || { name: '', email: '' };
+  const newAns = await inquirer.prompt([
+    { type: 'input', name: 'newName', message: 'Your new author NAME (GitHub):', default: def.name || undefined, validate: required },
+    { type: 'input', name: 'newEmail', message: 'Your new verified EMAIL (GitHub):', default: def.email || undefined, validate: requiredEmail },
+  ]);
+  const newIdentity = { name: newAns.newName.trim(), email: newAns.newEmail.trim() };
+
+  // Who is "you"? Pre-select by matching git email; otherwise ask.
+  let you = resolveYou({ identities, gitEmail });
+  if (you) {
+    process.stderr.write(`  Detected you as ${you.name} <${you.email}> (matches your git config).\n`);
+  } else {
+    const { youEmail } = await inquirer.prompt([{
+      type: 'list', name: 'youEmail', message: 'Which detected author is YOU?',
+      choices: identities.map((id) => ({ name: `${id.name} <${id.email}>`, value: id.email })),
     }]);
-    const s = String(mapping ?? '').trim();
-    if (!s) continue;
-    const m = s.match(/^(.+?)\s*<([^>]+)>\s*$/);
-    entries.push({ name: m[1].trim(), email: m[2].trim(), sourceEmail: id.email });
+    you = identities.find((id) => id.email === youEmail);
   }
-  return entries;
+
+  // Everyone else is kept by default; offer to remap teammates.
+  const others = identities.filter((id) => id.email.toLowerCase() !== you.email.toLowerCase());
+  const teammates = [];
+  if (others.length) {
+    const { editTeam } = await inquirer.prompt([{
+      type: 'confirm', name: 'editTeam', default: false,
+      message: `Also remap any of the ${others.length} other author(s)? (default: keep them unchanged)`,
+    }]);
+    if (editTeam) {
+      for (const id of others) {
+        const { mapping } = await inquirer.prompt([{
+          type: 'input', name: 'mapping', validate: targetOrBlank,
+          message: `Map ${id.name} <${id.email}> → (blank = keep) "New Name <new@email>":`,
+        }]);
+        const s = String(mapping ?? '').trim();
+        if (!s) continue;
+        const m = s.match(/^(.+?)\s*<([^>]+)>\s*$/);
+        teammates.push({ sourceEmail: id.email, target: { name: m[1].trim(), email: m[2].trim() } });
+      }
+    }
+  }
+
+  return buildIdentityEntries({ you, newIdentity, teammates });
 }
 
-/** Yes/no confirmation (team mode rewrites teammates, so we confirm first). */
+/** The confirm gate before any rewrite. */
 export async function confirmProceed(message = 'Proceed?') {
   const inquirer = await loadInquirer();
   const { ok } = await inquirer.prompt([{ type: 'confirm', name: 'ok', message, default: false }]);

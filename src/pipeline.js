@@ -8,7 +8,7 @@
 import { existsSync, writeFileSync, rmSync } from 'node:fs';
 import { run, query, status, gitDir } from './git.js';
 import { buildMailmap } from './config.js';
-import { parseBranchRefs, resolveBranchSet, parseIdentities } from './team.js';
+import { parseBranchRefs, resolveBranches, parseIdentities } from './team.js';
 
 const noop = () => {};
 const defaultUi = { step: noop, info: noop, ok: noop, warn: noop, spinner: () => ({ start() { return this; }, succeed() { return this; }, fail() { return this; }, stop() { return this; } }) };
@@ -88,9 +88,9 @@ export async function rewriteHistory(cfg, ui = defaultUi) {
   return { rewritten: true };
 }
 
-/** Enumerate the branches present in the staging mirror. */
-export function listBranches(cfg) {
-  const out = query('git', [...gitDir(cfg.stagingMirror), 'for-each-ref', '--format=%(refname:short)', 'refs/heads/']) || '';
+/** Enumerate the branches present in a mirror (defaults to the staging mirror). */
+export function listBranches(cfg, dir = cfg.stagingMirror) {
+  const out = query('git', [...gitDir(dir), 'for-each-ref', '--format=%(refname:short)', 'refs/heads/']) || '';
   return parseBranchRefs(out);
 }
 
@@ -158,11 +158,12 @@ export async function migrate(cfg, ui = defaultUi) {
   const sync = await syncSourceMirror(cfg, ui);
   await buildStaging(cfg, ui);
   const rewrite = await rewriteHistory(cfg, ui);
-  // Resolve the branch set after the mirror exists so --all-branches can enumerate them.
-  const branches = resolveBranchSet({
+  // Resolve the branch set after the mirror exists. Default = every branch;
+  // an explicit --branch list narrows it; --all-branches forces all.
+  const branches = resolveBranches({
+    explicit: cfg.branchesExplicit ? cfg.branches : [],
     allBranches: !!cfg.allBranches,
     available: listBranches(cfg),
-    explicit: cfg.branches,
   });
   const pushes = [];
   for (const branch of branches) pushes.push(await pushBranch(cfg, branch, ui));

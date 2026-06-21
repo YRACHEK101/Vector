@@ -2,7 +2,7 @@
 // config.js — pure configuration logic (no prompts, no side effects, no deps).
 // Everything here is unit-tested.
 // ─────────────────────────────────────────────────────────────────────────────
-import { resolveMailmapEntries } from './team.js';
+import { resolveMailmapEntries, buildLegacyEntries } from './team.js';
 
 export const DEFAULT_BRANCHES = ['master', 'main'];
 export const REQUIRED = ['azureUrl', 'githubSsh', 'oldEmail', 'newName', 'newEmail'];
@@ -64,8 +64,7 @@ export function configFromEnv(env = process.env) {
     branches: env.PUSH_BRANCHES ? parseBranches(env.PUSH_BRANCHES) : [],
     sshKey: env.SSH_KEY || '',
     force: false,
-    // Team Migration mode
-    teamMode: parseBool(env.TEAM_MODE),
+    // Identity mapping sources (file / inline) and branch scope
     mailmapPath: env.MAILMAP || '',
     maps: parseMapsEnv(env.MAPS),
     allBranches: parseBool(env.ALL_BRANCHES),
@@ -102,13 +101,34 @@ export function validateConfig(cfg) {
 }
 
 /**
+ * Validate a unified run. The Azure source and GitHub destination are always
+ * required; in --non-interactive mode the identity mapping must also be fully
+ * specified up front (no "which author is you?" prompt is available).
+ */
+export function validateRun(final, { interactive = false } = {}) {
+  const errors = [];
+  const empty = (v) => v == null || String(v).trim() === '';
+  if (empty(final.azureUrl)) errors.push('Missing Azure source URL (--azure-url / AZURE_URL).');
+  if (empty(final.githubSsh)) errors.push('Missing GitHub destination (--github-ssh / GITHUB_SSH).');
+  else if (!/^(git@|ssh:\/\/)/.test(final.githubSsh)) {
+    errors.push('githubSsh should be an SSH URL, e.g. git@github.com:USER/REPO.git');
+  }
+  if (!interactive) {
+    const hasMapping = !!(final.mailmapText && final.mailmapText.trim());
+    if (!hasMapping) {
+      errors.push('Non-interactive mode needs a complete identity mapping: provide --mailmap, --map, or --old-email with --new-name/--new-email.');
+    }
+  }
+  return { ok: errors.length === 0, errors };
+}
+
+/**
  * Produce the fully-resolved config used by the pipeline: derived slug, default
  * branches, the de-duplicated list of old emails, on-disk mirror paths, and the
  * git transport environment.
  */
 export function finalizeConfig(cfg, { cwd = process.cwd() } = {}) {
   const project = cfg.project || deriveProjectSlug(cfg.githubSsh) || 'repo';
-  const branches = parseBranches(cfg.branches);
   const allOldEmails = parseEmails([cfg.oldEmail, ...(cfg.extraOldEmails || [])]);
   const sshKey = cfg.sshKey || '';
   const gitEnv = {
@@ -117,39 +137,37 @@ export function finalizeConfig(cfg, { cwd = process.cwd() } = {}) {
       : 'ssh -o BatchMode=yes',
   };
 
-  // Resolve the mailmap + the set of emails that must disappear after the rewrite.
-  // Team mode: a supplied mailmap (file/inline) drives a multi-developer rewrite.
-  // Personal mode: build the single-identity mailmap from new* + allOldEmails.
-  let mailmapText;
-  let rewriteEmails;
-  let hasNameOnlyMapping;
-  const hasTeamSources = cfg.teamMode || (cfg.mailmapText && cfg.mailmapText.trim()) || (cfg.maps && cfg.maps.length);
-  if (hasTeamSources) {
-    const resolved = resolveMailmapEntries({
-      fileText: cfg.mailmapText || '',
-      mapStrings: cfg.maps || [],
-    });
-    mailmapText = resolved.text;
-    rewriteEmails = resolved.rewriteEmails;
-    hasNameOnlyMapping = resolved.hasNameOnly;
-  } else {
-    mailmapText = buildMailmap(cfg.newName, cfg.newEmail, allOldEmails);
-    rewriteEmails = allOldEmails;
-    hasNameOnlyMapping = false;
-  }
+  // Branch scope. The pipeline default is EVERY branch (resolved after the mirror
+  // exists). `branches` keeps the legacy default for display/back-compat, while
+  // `branchesExplicit` records whether the operator actually narrowed the set.
+  const explicitBranches = parseBranches(cfg.branches, []);
+  const branchesExplicit = explicitBranches.length > 0;
+  const branches = branchesExplicit ? explicitBranches : [...DEFAULT_BRANCHES];
+
+  // One unified identity mapping built from every source (highest precedence wins):
+  //   --mailmap file  >  --map inline  >  --old-email/--new-* legacy trio.
+  // Interactive answers arrive pre-resolved as cfg.mailmapText (the file tier).
+  const legacyEntries = buildLegacyEntries({
+    oldEmail: cfg.oldEmail, extraOldEmails: cfg.extraOldEmails, newName: cfg.newName, newEmail: cfg.newEmail,
+  });
+  const resolved = resolveMailmapEntries({
+    fileText: cfg.mailmapText || '',
+    mapStrings: cfg.maps || [],
+    legacyEntries,
+  });
 
   return {
     ...cfg,
     project,
     branches,
+    branchesExplicit,
     allOldEmails,
     sshKey,
     force: !!cfg.force,
-    teamMode: !!cfg.teamMode,
     allBranches: !!cfg.allBranches,
-    mailmapText,
-    rewriteEmails,
-    hasNameOnlyMapping,
+    mailmapText: resolved.text,
+    rewriteEmails: resolved.rewriteEmails,
+    hasNameOnlyMapping: resolved.hasNameOnly,
     gitEnv,
     sourceMirror: `${cwd}/${project}-source.git`,
     stagingMirror: `${cwd}/${project}-migration.git`,
