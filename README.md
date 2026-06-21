@@ -16,7 +16,7 @@ npx vector-migrate          # run the interactive wizard — no install required
 
 ---
 
-## 📖 What is Vector?
+## What is Vector?
 
 Vector (`vector-migrate`) is an **interactive, zero-token** NPM command-line utility that bridges your Git repositories from **Azure DevOps** to **GitHub** seamlessly.
 
@@ -24,23 +24,23 @@ It preserves your complete commit history and re-attributes your authorship — 
 
 ---
 
-## 🛑 The Real-World Problem It Solves
+## The Real-World Problem It Solves
 
 Moving from a closed enterprise ecosystem (Azure DevOps) to a public one (GitHub) looks like a one-line `git push` — until it quietly costs you your credit, your credentials, or an afternoon staring at a frozen terminal. Vector is built to kill three very specific pains:
 
-### 🟩 The Contribution Graph Wipeout
+### The Contribution Graph Wipeout
 
 Inside a company you commit with a corporate work email (`you@bigcorp.com`). GitHub only lights up your contribution graph for commits whose author email is **verified on your account** — so a standard migration carries every one of those commits over as an unattributed "ghost." Months or years of real work simply never show up as green squares.
 
 Vector rewrites **only your old corporate identity** to your personal, verified identity — leaving teammates' commits untouched — so your history counts again, at its original dates.
 
-### 🔐 The Security Token Leak
+### The Security Token Leak
 
 The quick-and-dirty way to authenticate a migration is to paste a Personal Access Token (PAT) directly into the clone URL or a config file. That token then bleeds into your shell history, your `.git/config`, and CI logs — a credential time-bomb that's trivially exfiltrated.
 
 Vector is **zero-token by design**: it authenticates over SSH keys only, and reads configuration from safe local environment variables or interactive in-memory prompts that are never written to disk. There is simply no secret to hardcode, log, or accidentally commit.
 
-### 🧊 The HTTPS Push Freeze
+### The HTTPS Push Freeze
 
 Pushing a large history over HTTPS routinely hangs at `Writing objects: 100%` on macOS and Linux — the client stalls waiting on a server acknowledgment stuck behind buffer limits.
 
@@ -48,7 +48,7 @@ Vector eliminates the bottleneck by streaming over a **single persistent raw-SSH
 
 ---
 
-## ⚡ Quick Start
+## Quick Start
 
 ```bash
 # 1. Install the one system dependency (see OS table below)
@@ -62,9 +62,9 @@ That's it. The interactive wizard prompts for your Azure source, GitHub destinat
 
 ---
 
-## 💻 Installation & Usage
+## Installation & Usage
 
-Vector needs **Node.js ≥ 18** plus two git tools (`git` and `git-filter-repo` — see [Prerequisites](#-prerequisites-git-filter-repo)).
+Vector needs **Node.js ≥ 18** plus two git tools (`git` and `git-filter-repo` — see [Prerequisites](#prerequisites-git-filter-repo)).
 
 **Run with no install:**
 
@@ -87,11 +87,11 @@ vector-migrate --check         # preflight: validate tools + config, change noth
 vector-migrate --help          # full flag reference
 ```
 
-> 💡 **Run `vector-migrate --check` first.** It verifies that `git` and `git-filter-repo` are installed and prints exact, OS-specific install instructions if anything is missing.
+> **Tip:** Run `vector-migrate --check` first — it verifies that `git` and `git-filter-repo` are installed and prints exact, OS-specific install instructions if anything is missing.
 
 ---
 
-## 🤖 Non-Interactive / Scripted Runs
+## Non-Interactive / Scripted Runs
 
 Every prompt has a flag **and** an environment variable. Provide them up front to skip the wizard entirely — ideal for CI.
 
@@ -138,7 +138,7 @@ vector-migrate --non-interactive
 
 ---
 
-## 🏁 Prerequisites: `git-filter-repo`
+## Prerequisites: `git-filter-repo`
 
 Vector's one system dependency is `git-filter-repo` (it also needs `git`, which you almost certainly already have). Install it for your OS:
 
@@ -148,14 +148,14 @@ Vector's one system dependency is `git-filter-repo` (it also needs `git`, which 
 | **Linux (Ubuntu/Debian)** | `sudo apt install git-filter-repo` |
 | **Windows** | `pip install git-filter-repo` (via Python) — run Vector in Git Bash or WSL |
 
-### 🍎 macOS
+### macOS
 
 ```bash
 brew install git-filter-repo
 npx vector-migrate
 ```
 
-### 🐧 Linux (Ubuntu / Debian)
+### Linux (Ubuntu / Debian)
 
 ```bash
 sudo apt update && sudo apt install -y git git-filter-repo
@@ -166,7 +166,7 @@ pip3 install --user git-filter-repo
 npx vector-migrate
 ```
 
-### 🪟 Windows
+### Windows
 
 `git-filter-repo` is a Python program, so install Python first, then the tool, then run Vector through a Bash-capable shell.
 
@@ -193,7 +193,7 @@ npx vector-migrate
 
 ---
 
-## 🔄 Incremental Syncs (re-running safely)
+## Incremental Syncs (re-running safely)
 
 Migration is rarely one-and-done. Re-run Vector any time new commits land on Azure — it's incremental and strictly **non-destructive**:
 
@@ -204,7 +204,7 @@ Migration is rarely one-and-done. Re-run Vector any time new commits land on Azu
 
 ---
 
-## 🏗️ How It Works
+## How It Works
 
 ```text
   Azure DevOps                         (local)                         GitHub
@@ -224,7 +224,7 @@ A pristine **source mirror** is the only thing fetched into; a disposable **stag
 
 ---
 
-## ✅ Testing & Quality
+## Testing & Quality
 
 Vector ships with a rigorous, fully-offline test suite (Node's built-in runner — no test-framework dependency):
 
@@ -238,7 +238,7 @@ A pure-Bash implementation (`migrate.sh`, with `tests/run_tests.sh`) is also inc
 
 ---
 
-## 🤝 Contributing
+## Contributing
 
 Contributions are welcome!
 
@@ -249,6 +249,6 @@ Contributions are welcome!
 
 ---
 
-## 📄 License
+## License
 
 Released under the **MIT License** — see [`LICENSE`](LICENSE).
