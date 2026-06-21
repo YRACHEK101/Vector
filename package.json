@@ -1,10 +1,10 @@
 {
   "name": "vector-migrate",
   "version": "1.0.0",
-  "description": "Interactive, zero-token CLI that migrates Git repositories from Azure DevOps to GitHub while preserving full history and contribution-graph attribution.",
+  "description": "Interactive, zero-token CLI that migrates Azure DevOps repositories to GitHub, preserving full commit history and rewriting author identities so the contribution graph stays intact.",
   "type": "module",
   "bin": {
-    "vector-migrate": "./bin/index.js"
+    "vector-migrate": "bin/index.js"
   },
   "exports": {
     ".": "./src/cli.js"
@@ -12,6 +12,7 @@
   "files": [
     "bin/",
     "src/",
+    "migrate.sh",
     "README.md",
     "LICENSE"
   ],
@@ -21,7 +22,8 @@
   "scripts": {
     "start": "node ./bin/index.js",
     "check": "node ./bin/index.js --check",
-    "test": "node --test tests/*.test.js"
+    "test": "node --test tests/*.test.js",
+    "prepublishOnly": "npm test"
   },
   "keywords": [
     "azure-devops",
@@ -29,13 +31,21 @@
     "git",
     "migration",
     "git-filter-repo",
-    "cli",
     "contribution-graph",
+    "cli",
     "ssh",
     "mailmap"
   ],
   "author": "Vector contributors",
   "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/YRACHEK101/Vector.git"
+  },
+  "homepage": "https://github.com/YRACHEK101/Vector#readme",
+  "bugs": {
+    "url": "https://github.com/YRACHEK101/Vector/issues"
+  },
   "dependencies": {
     "chalk": "^5.3.0",
     "inquirer": "^9.2.23",

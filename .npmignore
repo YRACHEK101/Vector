@@ -1,0 +1,11 @@
+node_modules
+*-source.git
+*-migration.git
+*-mailmap.txt
+*.log
+tests
+assets
+.git
+.gitignore
+.DS_Store
+package-lock.json
