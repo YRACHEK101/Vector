@@ -1,0 +1,44 @@
+{
+  "name": "vector-migrate",
+  "version": "1.0.0",
+  "description": "Interactive, zero-token CLI that migrates Git repositories from Azure DevOps to GitHub while preserving full history and contribution-graph attribution.",
+  "type": "module",
+  "bin": {
+    "vector-migrate": "./bin/index.js"
+  },
+  "exports": {
+    ".": "./src/cli.js"
+  },
+  "files": [
+    "bin/",
+    "src/",
+    "README.md",
+    "LICENSE"
+  ],
+  "engines": {
+    "node": ">=18"
+  },
+  "scripts": {
+    "start": "node ./bin/index.js",
+    "check": "node ./bin/index.js --check",
+    "test": "node --test tests/*.test.js"
+  },
+  "keywords": [
+    "azure-devops",
+    "github",
+    "git",
+    "migration",
+    "git-filter-repo",
+    "cli",
+    "contribution-graph",
+    "ssh",
+    "mailmap"
+  ],
+  "author": "Vector contributors",
+  "license": "MIT",
+  "dependencies": {
+    "chalk": "^5.3.0",
+    "inquirer": "^9.2.23",
+    "ora": "^8.0.1"
+  }
+}

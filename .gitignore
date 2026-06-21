@@ -1,0 +1,11 @@
+# Dependencies
+node_modules/
+
+# Migration artifacts created at runtime
+*-source.git/
+*-migration.git/
+*-mailmap.txt
+
+# Logs / OS cruft
+*.log
+.DS_Store

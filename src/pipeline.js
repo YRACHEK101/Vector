@@ -1,0 +1,136 @@
+// ─────────────────────────────────────────────────────────────────────────────
+// pipeline.js — the migration engine: source mirror sync → deterministic rewrite
+// staging → mailmap rewrite → ancestry-aware SSH push → verify.
+//
+// Mirrors the proven shell logic. The push DECISION is a pure function (unit
+// tested); the IO steps are integration-tested against local stand-in repos.
+// ─────────────────────────────────────────────────────────────────────────────
+import { existsSync, writeFileSync, rmSync } from 'node:fs';
+import { run, query, status, gitDir } from './git.js';
+import { buildMailmap } from './config.js';
+
+const noop = () => {};
+const defaultUi = { step: noop, info: noop, ok: noop, warn: noop, spinner: () => ({ start() { return this; }, succeed() { return this; }, fail() { return this; }, stop() { return this; } }) };
+
+/**
+ * Pure decision for how to push a branch given the local & remote tip SHAs and an
+ * ancestry oracle. This is the heart of the non-destructive guarantee.
+ *   missing-local | create | noop | fast-forward | remote-ahead | diverged
+ */
+export function decidePushStrategy({ localSha, remoteSha, isAncestor }) {
+  if (!localSha) return 'missing-local';
+  if (!remoteSha) return 'create';
+  if (remoteSha === localSha) return 'noop';
+  if (isAncestor(remoteSha, localSha)) return 'fast-forward'; // remote behind → safe FF
+  if (isAncestor(localSha, remoteSha)) return 'remote-ahead'; // remote ahead → never overwrite
+  return 'diverged';                                          // only force after confirm
+}
+
+/** Step 1 — keep a pristine source mirror, fetching new commits into it (never rewriting it). */
+export async function syncSourceMirror(cfg, ui = defaultUi) {
+  if (existsSync(cfg.sourceMirror)) {
+    const sp = ui.spinner('Fetching new commits from Azure into existing mirror').start();
+    await run('git', [...gitDir(cfg.sourceMirror), 'remote', 'set-url', 'origin', cfg.azureUrl], { env: cfg.gitEnv }).catch(noop);
+    await run('git', [...gitDir(cfg.sourceMirror), 'remote', 'update', 'origin'], { env: cfg.gitEnv });
+    sp.succeed('Source mirror updated');
+    return { mode: 'incremental' };
+  }
+  const sp = ui.spinner('Mirror-cloning the Azure repository (full history)').start();
+  await run('git', ['clone', '--mirror', cfg.azureUrl, cfg.sourceMirror], { env: cfg.gitEnv });
+  sp.succeed('Source mirror created');
+  return { mode: 'initial' };
+}
+
+/** Step 2 — rebuild a fully-isolated rewrite copy from the source (deterministic SHAs). */
+export async function buildStaging(cfg, ui = defaultUi) {
+  rmSync(cfg.stagingMirror, { recursive: true, force: true });
+  const sp = ui.spinner('Building isolated rewrite staging copy').start();
+  await run('git', ['clone', '--mirror', '--no-hardlinks', cfg.sourceMirror, cfg.stagingMirror], { env: cfg.gitEnv });
+  sp.succeed('Staging copy ready');
+}
+
+/** Are any of the old emails still present anywhere in the staging history? */
+export function oldEmailsPresent(cfg) {
+  const out = query('git', [...gitDir(cfg.stagingMirror), 'log', '--all', '--format=%ae%n%ce']) || '';
+  const have = new Set(out.split('\n').map((s) => s.trim().toLowerCase()).filter(Boolean));
+  return cfg.allOldEmails.some((e) => have.has(String(e).toLowerCase()));
+}
+
+/** Step 3 — write the mailmap and rewrite history (skipped if no old email remains). */
+export async function rewriteHistory(cfg, ui = defaultUi) {
+  writeFileSync(cfg.mailmapFile, buildMailmap(cfg.newName, cfg.newEmail, cfg.allOldEmails));
+  if (!oldEmailsPresent(cfg)) {
+    ui.ok('No matching old email in history — already rewritten, skipping.');
+    return { rewritten: false };
+  }
+  const sp = ui.spinner('Rewriting author/committer identities via git-filter-repo').start();
+  await run('git', [...gitDir(cfg.stagingMirror), 'filter-repo', '--mailmap', cfg.mailmapFile, '--force'], { env: cfg.gitEnv });
+  sp.succeed('History rewritten');
+  if (oldEmailsPresent(cfg)) {
+    throw new Error('Safety check failed: an old email still remains in history after the rewrite. Aborting before push.');
+  }
+  return { rewritten: true };
+}
+
+/** Step 4 — push one branch using the only safe strategy for its remote relationship. */
+export async function pushBranch(cfg, branch, ui = defaultUi) {
+  const gd = gitDir(cfg.stagingMirror);
+  const localSha = query('git', [...gd, 'rev-parse', `refs/heads/${branch}`]);
+  if (!localSha) {
+    ui.warn(`[${branch}] not found in source — skipping.`);
+    return { branch, strategy: 'missing-local' };
+  }
+
+  const ls = query('git', [...gd, 'ls-remote', cfg.githubSsh, `refs/heads/${branch}`], { env: cfg.gitEnv });
+  const remoteSha = ls ? ls.split(/\s+/)[0] : '';
+
+  // Pull the remote tip into a private scratch ref so ancestry checks are local.
+  if (remoteSha && remoteSha !== localSha) {
+    await run('git', [...gd, 'fetch', cfg.githubSsh, `+refs/heads/${branch}:refs/vector/remote/${branch}`], { env: cfg.gitEnv }).catch(noop);
+  }
+  const isAncestor = (a, b) => status('git', [...gd, 'merge-base', '--is-ancestor', a, b]) === 0;
+  const strategy = decidePushStrategy({ localSha, remoteSha, isAncestor });
+
+  const doPush = (force = false) =>
+    run('git', [...gd, 'push', ...(force ? ['--force'] : []), cfg.githubSsh, `refs/heads/${branch}:refs/heads/${branch}`], { env: cfg.gitEnv });
+
+  switch (strategy) {
+    case 'create':
+      await doPush(); ui.ok(`[${branch}] created on GitHub (new branch).`); break;
+    case 'noop':
+      ui.ok(`[${branch}] already up to date — nothing to push.`); break;
+    case 'fast-forward': {
+      const ahead = query('git', [...gd, 'rev-list', '--count', `${remoteSha}..${localSha}`]) || '?';
+      await doPush(); ui.ok(`[${branch}] fast-forwarded (+${ahead} commit(s)) — existing history preserved.`); break;
+    }
+    case 'remote-ahead':
+      ui.warn(`[${branch}] remote is AHEAD — skipping to protect GitHub history.`); break;
+    case 'diverged':
+      if (cfg.force) { await doPush(true); ui.warn(`[${branch}] force-pushed (divergence resolved).`); }
+      else ui.warn(`[${branch}] histories DIVERGED — skipped. Re-run with --force to overwrite.`);
+      break;
+  }
+  return { branch, strategy, localSha, remoteSha };
+}
+
+/** Step 5 — confirm each branch's remote tip matches local where we pushed. */
+export function verify(cfg) {
+  const gd = gitDir(cfg.stagingMirror);
+  return cfg.branches.map((branch) => {
+    const localSha = query('git', [...gd, 'rev-parse', `refs/heads/${branch}`]);
+    if (!localSha) return { branch, status: 'missing-local' };
+    const ls = query('git', [...gd, 'ls-remote', cfg.githubSsh, `refs/heads/${branch}`], { env: cfg.gitEnv });
+    const remoteSha = ls ? ls.split(/\s+/)[0] : '';
+    return { branch, status: remoteSha === localSha ? 'in-sync' : (remoteSha ? 'differs' : 'absent'), localSha, remoteSha };
+  });
+}
+
+/** Full pipeline: idempotent, incremental, non-destructive. */
+export async function migrate(cfg, ui = defaultUi) {
+  const sync = await syncSourceMirror(cfg, ui);
+  await buildStaging(cfg, ui);
+  const rewrite = await rewriteHistory(cfg, ui);
+  const pushes = [];
+  for (const branch of cfg.branches) pushes.push(await pushBranch(cfg, branch, ui));
+  return { mode: sync.mode, rewrite, pushes, verification: verify(cfg) };
+}
