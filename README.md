@@ -1,271 +1,174 @@
-# Vector — Azure DevOps → GitHub Migration Engine
+# 🧭 Vector
 
-> A universal migration bridge for moving Git repositories from **Azure DevOps**
-> to **GitHub** *safely* — without losing author attribution or your green
-> contribution graph.
-
-Vector mirrors a repository's **entire commit history** to GitHub and, in the
-same pass, re-attributes the commits you authored under an old work email to your
-new identity — so they land on your contribution graph at their **original
-dates**. Teammates' commits are never touched.
-
-It is a single, dependency-light Bash script designed to be **safe by default**:
-
-- **Idempotent** — re-run it anytime; it detects work already done and skips it.
-- **Never destructive without consent** — it asks before any force-push.
-- **Zero secrets on disk** — transport is SSH; no tokens in URLs or `.git/config`.
-- **Config-free to start** — flags, environment variables, *or* an interactive
-  wizard. You never have to edit the script.
+**A professional, zero-token CLI utility for migrating Git repositories from Azure DevOps to GitHub — without losing your history or your green squares.**
 
 ---
 
-## Why Vector?
+## 📖 1. What is Vector?
 
-Azure DevOps and GitHub model identity differently, and a naïve `git push` of a
-mirrored repo will scatter your history across "ghost" authors — none of which
-count toward your GitHub profile. The common workarounds (manual `filter-branch`
-incantations, paid migration SaaS, HTTPS pushes that mysteriously hang at
-`Writing objects: 100%` on macOS) are fragile or opaque.
-
-Vector packages the reliable path into one auditable script you can read top to
-bottom in a couple of minutes.
-
----
-
-## Quick start
+Vector is a professional, **zero-token** command-line utility that bridges your repositories from **Azure DevOps** to **GitHub** seamlessly — preserving the complete commit history and re-attributing your authorship so your public contribution graph survives the move. It runs as a single, auditable script with **no Personal Access Tokens, no SaaS, and no manual git surgery**, driven entirely by CLI flags, environment variables, or a friendly interactive wizard.
 
 ```bash
-# 1. Clone this repository
-git clone <this-repo-url> vector && cd vector
-chmod +x migrate.sh
+./migrate.sh            # interactive wizard — just answer the prompts
+./migrate.sh --check    # preflight: validate tools + config, change nothing
+```
 
-# 2a. Run the interactive wizard — just answer the prompts
+---
+
+## 🛑 The Real-World Problem It Solves
+
+Moving from a closed enterprise ecosystem (Azure DevOps) to a public one (GitHub) looks like a simple `push` — until it quietly costs you your history, your security, or an afternoon staring at a frozen terminal. Vector exists to kill three specific pains:
+
+### 🟩 The Graph Loss
+Inside a company you commit with a **corporate email** (`you@bigcorp.com`). A plain migration carries those commits over verbatim — and because GitHub only credits commits authored by an email **verified on your account**, every one of them becomes an unattributed "ghost" commit. The result: months or years of real work that **never shows up on your public contribution graph**. Vector rewrites *only your* old corporate identity to your personal verified identity (leaving teammates untouched), so your green squares come back — at their **original commit dates**.
+
+### 🔐 The Data Leak Risk
+The quick-and-dirty way to authenticate a migration is to paste a **Personal Access Token directly into a clone URL** or a config file. That token then leaks into your shell history, your `.git/config`, and any logs — a credential time-bomb. Vector is **zero-token**: it authenticates over **SSH keys** only, so there is no secret to hardcode, log, or accidentally commit.
+
+### 🧊 The Push Hang
+Pushing a large history over **HTTPS frequently freezes at `Writing objects: 100%`** on macOS and Linux — the client stalls waiting on a server acknowledgment that never seems to arrive (a well-known buffering issue). Vector sidesteps it entirely by streaming over a **single persistent SSH connection**, so big repositories transfer reliably.
+
+---
+
+## 🛠️ How to Configuration (Line-by-Line Guide)
+
+> **You never edit the script.** Vector resolves every value in this order:
+> **CLI flags → environment variables → interactive wizard** (with smart defaults).
+
+The cleanest way to run it dynamically is to **export the configuration block** below, then run the script. Copy it, fill in your values, and paste it into your terminal (or a `.env` you `source`):
+
+```bash
+# ── Vector configuration ─────────────────────────────────────────────────────
+export PROJECT="my-repo"                                    # local folder slug
+export OLD_EMAIL="you@old-corp.com"                         # corporate email in old commits
+export NEW_NAME="your-github-username"                      # GitHub username
+export NEW_EMAIL="you@personal.com"                         # personal, GitHub-verified email
+export AZURE_URL="https://org@dev.azure.com/org/Project/_git/Repo"
+export GITHUB_SSH="git@github.com:your-user/your-repo.git"  # destination repo, SSH form
+export PUSH_BRANCHES="main develop"                         # branch(es) to synchronize
+# ─────────────────────────────────────────────────────────────────────────────
+
 ./migrate.sh
 ```
 
-That's it. The only step Vector cannot do for you is **pasting your SSH public
-key into GitHub** (it requires your logged-in browser) — and it walks you through
-that, copying the key to your clipboard and polling until it's registered.
+Exactly what each line means:
 
-### Option B — drive it with flags
+| Line / Variable | What to put there | Notes |
+|---|---|---|
+| `PROJECT` | A short **local folder slug** | Names the on-disk mirrors (`my-repo-source.git`, `my-repo-migration.git`). Auto-derived from `GITHUB_SSH` if omitted. |
+| `OLD_EMAIL` | The **old corporate email** bound to your old commits | This — and only this — is remapped. Teammates' commits stay theirs. |
+| `NEW_NAME` | Your **GitHub username** | Used as the new author name and to confirm your SSH key is on the right account. |
+| `NEW_EMAIL` | Your **personal, GitHub-verified email** | **Must** be verified at <https://github.com/settings/emails> or the graph won't light up. |
+| `AZURE_URL` | The **source** Azure DevOps clone URL | The `…/_git/Repo` HTTPS URL. |
+| `GITHUB_SSH` | The **destination** GitHub repo, SSH form | `git@github.com:USER/REPO.git` — create the repo empty first. |
+| `PUSH_BRANCHES` | The **branches to synchronize** | Space- or comma-separated, e.g. `"main develop"`. |
+
+**Prefer flags?** Every variable has a flag equivalent, and `PUSH_BRANCHES` accepts the array-style `--branch` repeated or `--branches`:
 
 ```bash
 ./migrate.sh \
-  --azure-url  "https://org@dev.azure.com/org/Project/_git/Repo" \
-  --github-ssh "git@github.com:octocat/repo.git" \
-  --old-email  "old@work.example" \
-  --new-name   "octocat" \
-  --new-email  "me@personal.example" \
-  --branches   "main,develop" \
-  --yes
+  --project my-repo \
+  --old-email you@old-corp.com \
+  --new-name your-github-username \
+  --new-email you@personal.com \
+  --azure-url "https://org@dev.azure.com/org/Project/_git/Repo" \
+  --github-ssh "git@github.com:your-user/your-repo.git" \
+  --branch main --branch develop      # ← array of branches, one flag each
 ```
 
-### Option C — drive it with environment variables
+Run `./migrate.sh --help` for the full reference, or `./migrate.sh --check` to validate your configuration and tools **without making any changes**.
+
+---
+
+## 🔄 How to Use It for Existing Projects & Incremental Updates
+
+Migration is rarely one-and-done — work keeps landing on Azure DevOps after your first push. **Vector is designed to be re-run as often as you like.** Just run it again with the same configuration:
 
 ```bash
-export AZURE_URL="https://org@dev.azure.com/org/Project/_git/Repo"
-export GITHUB_SSH="git@github.com:octocat/repo.git"
-export OLD_EMAIL="old@work.example"
-export NEW_NAME="octocat"
-export NEW_EMAIL="me@personal.example"
-export PUSH_BRANCHES="main,develop"
-./migrate.sh --non-interactive
+./migrate.sh        # run it again whenever Azure has new commits
 ```
 
-Precedence is **CLI flags → environment variables → interactive prompt**. Mix and
-match freely: set the stable values in your environment and override per-run with
-flags.
+Each subsequent run is **incremental and strictly non-destructive**:
 
-### Configuration reference
+1. **Fetches only the new commits** from Azure into a pristine local mirror — it never re-clones and never corrupts what's already there.
+2. **Re-applies your identity rewrite deterministically**, so commits already on GitHub keep the **exact same SHAs**.
+3. **Fast-forwards just the new commits** onto GitHub. Existing history is left **byte-for-byte intact** — nothing is rewritten or crushed.
+4. **Never overwrites GitHub.** If the remote is *ahead* of your local copy, or the histories have genuinely **diverged**, Vector stops and tells you instead of clobbering anything — it will only ever force-push a true divergence after you **explicitly confirm**.
 
-| Flag | Environment variable | Description |
+In short: the **first run migrates**, and **every run after that safely tops up** the destination. You can wire `./migrate.sh --non-interactive --yes` into a cron job or CI step for hands-off, continuous mirroring.
+
+---
+
+## 💻 OS-Specific Installation & Execution Commands
+
+Vector needs two tools: **`git`** and **[`git-filter-repo`](https://github.com/newren/git-filter-repo)**. Install per your OS, then run.
+
+| OS | Install the dependency | Run Vector |
 |---|---|---|
-| `--azure-url` | `AZURE_URL` | Azure DevOps repository clone URL |
-| `--github-ssh` | `GITHUB_SSH` | Target GitHub repo in **SSH** form: `git@github.com:USER/REPO.git` |
-| `--old-email` | `OLD_EMAIL` | The old email used in your Azure commits |
-| `--new-name` | `NEW_NAME` | New author name / GitHub username |
-| `--new-email` | `NEW_EMAIL` | New email — **must be verified** on GitHub |
-| `--project` | `PROJECT` | Local folder slug (auto-derived from the repo name) |
-| `--branch` / `--branches` | `PUSH_BRANCHES` | Branch(es) to push; comma- or space-separated, repeatable |
-| `--extra-old-emails` | `EXTRA_OLD_EMAILS` | Additional old emails **of yours** to remap |
-| `--ssh-key` | `SSH_KEY` | Specific private key to use (otherwise auto-detected) |
-| `-y`, `--yes` | — | Assume "yes" for every confirmation prompt |
-| `--non-interactive` | — | Never prompt; require flags/env (ideal for CI) |
-| `-h`, `--help` | — | Print the full flag reference |
+| **macOS** | `brew install git-filter-repo` | `chmod +x migrate.sh && ./migrate.sh` |
+| **Linux (Ubuntu/Debian)** | `sudo apt install git-filter-repo`  *(or `pip3 install --user git-filter-repo`)* | `chmod +x migrate.sh && ./migrate.sh` |
+| **Windows** | `pip install git-filter-repo` (needs Python) | run via **Git Bash** / **WSL**: `bash migrate.sh` |
 
-Run `./migrate.sh --help` at any time for the same reference.
-
----
-
-## Prerequisites
-
-Vector checks and, where possible, handles these for you:
-
-1. **Tools:** `git` and [`git-filter-repo`](https://github.com/newren/git-filter-repo)
-   (`brew install git-filter-repo`, or `pip3 install --user git-filter-repo`).
-2. **Verified email:** add `NEW_EMAIL` at <https://github.com/settings/emails> —
-   *required* for commits to appear on your graph.
-3. **Empty target repo** on GitHub — create it with **no** README, `.gitignore`,
-   or license, so history can be pushed cleanly.
-4. **An SSH key on the correct account** — Vector auto-detects one (or generates
-   it) and waits until it sees the key registered on `NEW_NAME`.
-
----
-
-## How it works
-
-Vector runs a short, auditable pipeline. Each stage is idempotent and verified
-before the next begins:
-
-```
-  Azure DevOps                                            GitHub
-  ┌──────────┐   1. bare mirror   ┌───────────────┐   3. SSH push   ┌────────┐
-  │  source  │ ─────────────────▶ │  <slug>-      │ ──────────────▶ │ target │
-  │   repo   │   (full history)   │  migration.git│   (per branch)  │  repo  │
-  └──────────┘                    └───────┬───────┘                 └────────┘
-                                          │
-                          2. mailmap rewrite via git-filter-repo
-                             (old email → new identity, all refs)
-```
-
-1. **Dynamic SSH key resolution.** Instead of assuming a fixed key path, Vector
-   inspects the running `ssh-agent`, then scans `~/.ssh/` for available key pairs
-   (prompting if several exist), and only generates a fresh `ed25519` key if none
-   are found. It pins that key for the whole run via `GIT_SSH_COMMAND`, trusts
-   `github.com`'s host key, polls `https://github.com/<USER>.keys` until the key
-   is live on the **right** account, and confirms `ssh -T git@github.com`.
-
-2. **Pristine source mirror.** `git clone --mirror` pulls the complete object
-   graph — every branch, tag, and note — into a local `*-source.git`. This mirror
-   tracks Azure and is the **only** repo Vector ever fetches into; it is never
-   rewritten, so re-fetching can add new commits but can never corrupt it. On
-   later runs Vector simply fetches the new commits instead of re-cloning.
-
-3. **Isolated rewrite staging.** A disposable `*-migration.git` is rebuilt from
-   the source on every run (`--no-hardlinks`, so it can never reach back and touch
-   the source's objects). Because `git filter-repo` is **deterministic** — the
-   same commits plus the same mailmap always yield the same SHAs — previously
-   migrated commits keep identical hashes across runs.
-
-4. **Mailmap rewriting.** A `mailmap` is generated from your old email(s) and
-   applied with `git filter-repo --mailmap`. This rewrites the **author,
-   committer, and tagger** fields across all refs — and *only* for the emails you
-   listed, leaving collaborators' commits intact. The step is skipped entirely if
-   no matching email remains, and a safety gate aborts the run if any of your old
-   emails survive the rewrite.
-
-5. **Ancestry-aware SSH push.** Each branch is pushed over a single persistent SSH
-   connection — sidestepping the macOS HTTPS hang at `Writing objects: 100%`.
-   Vector inspects the relationship between the remote tip and the local tip and
-   picks the only safe action: it **creates** a missing branch, **skips** one
-   already in sync, **fast-forwards** when the remote is strictly behind (the
-   normal incremental case — no force needed), **skips** when the remote is *ahead*
-   (never overwriting commits that exist only on GitHub), and only when histories
-   have genuinely **diverged** does it ask before force-pushing.
-
-6. **Verification.** After pushing, Vector re-reads each remote tip and confirms
-   it matches the local SHA (with a commit count) before reporting success.
-
-> **Why SSH, not HTTPS?** On macOS, HTTPS pushes reliably freeze at
-> `Writing objects: 100%` — the client waiting on a server acknowledgment, not a
-> slow upload. A single SSH stream avoids the stall and keeps secrets off disk.
-
----
-
-## Incremental syncs (re-running Vector)
-
-Migration is rarely a one-shot event — work keeps landing on Azure after the
-first push. Vector is built to be **re-run as many times as you like**:
+### 🍎 macOS
 
 ```bash
-./migrate.sh   # same config — run it again whenever Azure has new commits
+brew install git-filter-repo     # Homebrew provides both git and git-filter-repo
+chmod +x migrate.sh
+./migrate.sh --check             # optional: confirm everything is ready
+./migrate.sh
 ```
 
-Each re-run:
+### 🐧 Linux (Ubuntu / Debian)
 
-1. **Fetches only the new commits** from Azure into the pristine `*-source.git`
-   mirror — never re-cloning, never corrupting what's already there.
-2. **Re-applies the mailmap deterministically**, so already-migrated commits keep
-   the exact same SHAs they had on GitHub.
-3. **Fast-forwards** just the new commits onto GitHub. Existing history is left
-   byte-for-byte intact.
-4. **Never overwrites** GitHub. If the remote is ahead, or histories have truly
-   diverged, Vector stops and tells you — it only force-pushes a genuine
-   divergence after you explicitly confirm.
-
-Keep the `*-source.git` mirror between runs to make subsequent syncs fast. The
-`*-migration.git` staging copy is disposable and rebuilt automatically.
-
----
-
-## Troubleshooting
-
-**`Permission denied (publickey)`**
-The key isn't on the target account. Check what GitHub sees for it:
 ```bash
-curl -s https://github.com/<USER>.keys   # empty = no keys on that account
+# Recent distros ship a package; otherwise use pip:
+sudo apt update && sudo apt install -y git git-filter-repo
+#   ── or ──
+pip3 install --user git-filter-repo
+
+chmod +x migrate.sh
+./migrate.sh
 ```
-Make sure your browser is signed into the right account
-(<https://github.com/settings/keys>). "Key is already in use" when adding means
-the key lives on **another** account — remove it there, or let Vector generate a
-fresh one.
 
-**Push freezes at `Writing objects: 100%`**
-That's the HTTPS hang. Vector already uses SSH; if you're pushing manually, switch
-to the SSH remote.
+### 🪟 Windows
 
-**`cannot lock ref 'refs/heads/<b>': reference already exists`**
-A previous (seemingly frozen) push actually succeeded server-side. Confirm it's
-the same commit, and you're done:
+Vector is a Bash script, so run it through a Bash environment. Pick one:
+
+- **Git Bash** (simplest) — comes with [Git for Windows](https://git-scm.com/download/win):
+  ```bash
+  # In a Git Bash terminal:
+  pip install git-filter-repo        # requires Python on PATH
+  bash migrate.sh
+  ```
+- **WSL (Windows Subsystem for Linux)** — recommended for large repos; treat it exactly like Linux:
+  ```bash
+  sudo apt install -y git git-filter-repo   # or: pip3 install --user git-filter-repo
+  bash migrate.sh
+  ```
+- **PowerShell** — PowerShell can't execute a Bash script directly, so **wrap it with bash** (installed by Git for Windows):
+  ```powershell
+  # Install Python + git-filter-repo first:
+  pip install git-filter-repo
+  # Then hand the script to bash:
+  bash .\migrate.sh
+  ```
+
+> On native Windows without WSL, make sure **Python** is installed and on your `PATH` so `pip install git-filter-repo` works and `git filter-repo` is callable.
+
+---
+
+## ✅ Verify Your Setup
+
+Before a real run, two safe, no-op commands confirm everything is wired correctly:
+
 ```bash
-git ls-remote git@github.com:USER/REPO.git refs/heads/<b>   # compare to local
+./migrate.sh --check        # validates tools + configuration, makes no changes
+bash tests/run_tests.sh     # runs the offline automated test suite
 ```
 
-**Two authors after migration**
-Expected. Only **your** old email is remapped; a teammate's commits correctly stay
-attributed to them. Don't claim others' work.
-
-**Green squares not showing**
-- Confirm `NEW_EMAIL` is **verified** at <https://github.com/settings/emails>.
-- Commits appear at their **original dates** — navigate to that year on your
-  profile.
-- Commits must be on the **default branch** (set it in Settings → Branches).
-
 ---
 
-## Security
-
-- **Never** put a Personal Access Token in a URL or commit — it leaks into shell
-  history and `.git/config`. Vector uses **SSH keys** exclusively, so there are no
-  tokens to leak.
-- If a token is ever exposed, revoke it immediately at
-  <https://github.com/settings/tokens>.
-
----
-
-## Contributing
-
-Contributions are welcome — bug reports, docs, and features alike.
-
-1. **Open an issue first** for anything non-trivial, describing the problem and
-   your environment (OS, `bash --version`, `git --version`,
-   `git filter-repo --version`). Vector targets Bash 3.2+ for macOS
-   compatibility, so please avoid Bash 4-only features (`mapfile`, `${var,,}`,
-   associative arrays).
-2. **Fork and branch** from `main` (`feat/<topic>` or `fix/<topic>`).
-3. **Format & lint** before committing:
-   ```bash
-   shellcheck migrate.sh     # static analysis
-   bash -n migrate.sh        # syntax check
-   ```
-4. **Write clear commits** using [Conventional Commits](https://www.conventionalcommits.org)
-   (`feat:`, `fix:`, `docs:`, `refactor:`…).
-5. **Open a Pull Request** describing the change and how you tested it. Keep PRs
-   focused and small where possible.
-
----
-
-## License
+## 📄 License
 
 Released under the **MIT License**.
 

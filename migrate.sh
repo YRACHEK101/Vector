@@ -42,6 +42,7 @@ trap 'printf "\033[31mUnexpected failure near line %s (exit %s). Please re-run; 
 INTERACTIVE=true
 [[ -t 0 ]] || INTERACTIVE=false   # no TTY (piped/CI) → cannot prompt
 ASSUME_YES=false
+CHECK_ONLY=false                  # --check: validate tools/config, then exit
 
 # ask VAR "Prompt" [default] — read a value into VAR, honoring a smart default.
 ask() {
@@ -83,6 +84,20 @@ confirm() {
 git_mirror() { git -c safe.bareRepository=all --git-dir="$MIRROR_DIR" "$@"; }
 git_source() { git -c safe.bareRepository=all --git-dir="$SOURCE_MIRROR" "$@"; }
 
+# check_prereqs — verify the required CLI tools exist, with human-readable
+# install guidance if anything is missing. Used by both --check and a normal run.
+check_prereqs() {
+  step "Checking prerequisites"
+  command -v git >/dev/null 2>&1 \
+    || die "git is not installed. Install it from https://git-scm.com/downloads and re-run."
+  command -v git-filter-repo >/dev/null 2>&1 && { green "git + git-filter-repo found."; return 0; }
+  die "git-filter-repo is not installed. Install it, then re-run:
+    • macOS:           brew install git-filter-repo
+    • Debian/Ubuntu:   sudo apt-get install git-filter-repo
+    • Any OS via pip:  pip3 install --user git-filter-repo
+  Verify with:         git filter-repo --version"
+}
+
 # ──────────────────────────────────────────────────────────────────────────────
 #  Usage
 # ──────────────────────────────────────────────────────────────────────────────
@@ -111,6 +126,8 @@ FLAGS                         ENV VAR             DESCRIPTION
   --ssh-key <path>            SSH_KEY             Private key to use (else auto)
   -y, --yes                                       Assume "yes" for all prompts
   --non-interactive                               Never prompt; require flags/env
+  --check, --dry-run                              Validate tools + config, then exit
+                                                  (no network, no changes)
   -h, --help                                      Show this help and exit
 
 EXAMPLES
@@ -156,6 +173,7 @@ while [[ $# -gt 0 ]]; do
     --extra-old-emails) EXTRA_OLD_EMAILS="${2:?--extra-old-emails needs a value}"; shift 2 ;;
     -y|--yes)           ASSUME_YES=true;   shift ;;
     --non-interactive)  INTERACTIVE=false; shift ;;
+    --check|--dry-run)  CHECK_ONLY=true;   shift ;;
     -h|--help)          usage; exit 0 ;;
     *)                  die "Unknown argument: $1 (run --help)" ;;
   esac
@@ -217,17 +235,28 @@ printf '  %-14s %s\n' "Remap from:"  "${ALL_OLD[*]}"
 printf '  %-14s %s\n' "Branches:"    "${BRANCHES[*]}"
 printf '  %-14s %s\n' "Source dir:"  "$SOURCE_MIRROR"
 printf '  %-14s %s\n' "Staging dir:" "$MIRROR_DIR"
-[[ -d "$SOURCE_MIRROR" ]] && green "Existing source mirror detected — this will be an incremental sync."
+if [[ -d "$SOURCE_MIRROR" ]]; then
+  green "Existing source mirror detected — this will be an INCREMENTAL sync."
+else
+  green "No source mirror yet — this will be an INITIAL migration."
+fi
+
+# --check: validate tools + config and report readiness, without touching the
+# network or the filesystem. Great for a quick "can I run this?" preflight.
+if $CHECK_ONLY; then
+  step "Preflight (--check) — no network calls, no changes will be made"
+  check_prereqs
+  green "✅ Preflight OK — tools and configuration look good."
+  echo  "   Re-run without --check to perform the migration."
+  exit 0
+fi
+
 confirm "Proceed with this configuration?" || die "Aborted by user."
 
 # ──────────────────────────────────────────────────────────────────────────────
 #  0. Prerequisites
 # ──────────────────────────────────────────────────────────────────────────────
-step "Checking prerequisites"
-command -v git >/dev/null 2>&1 || die "git is not installed."
-command -v git-filter-repo >/dev/null 2>&1 \
-  || die "git-filter-repo missing. Install: brew install git-filter-repo (or pip3 install --user git-filter-repo)"
-green "git + git-filter-repo found."
+check_prereqs
 yellow "Reminder: '$NEW_EMAIL' must be ADDED and VERIFIED at https://github.com/settings/emails"
 yellow "          or the rewritten commits will not appear on your contribution graph."
 
