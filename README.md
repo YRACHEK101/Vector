@@ -10,6 +10,17 @@
 
 <p align="center"><em>Interactive · Zero-Token · Non-Destructive</em></p>
 
+<p align="center">
+  <a href="https://www.npmjs.com/package/vector-migrate"><img src="https://img.shields.io/npm/v/vector-migrate?color=cb3837&logo=npm" alt="npm version" /></a>
+  <a href="https://www.npmjs.com/package/vector-migrate"><img src="https://img.shields.io/npm/dm/vector-migrate?color=cb3837&logo=npm" alt="npm downloads" /></a>
+  <a href="https://nodejs.org"><img src="https://img.shields.io/node/v/vector-migrate?logo=node.js&logoColor=white" alt="node version" /></a>
+  <a href="./LICENSE"><img src="https://img.shields.io/npm/l/vector-migrate?color=blue" alt="MIT license" /></a>
+</p>
+
+<p align="center">
+  📦 <strong>Available on npm:</strong> <a href="https://www.npmjs.com/package/vector-migrate">npmjs.com/package/vector-migrate</a>
+</p>
+
 ```bash
 npx vector-migrate          # run the interactive wizard — no install required
 ```
