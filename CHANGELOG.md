@@ -4,6 +4,21 @@ All notable changes to `vector-migrate` are documented here. This project follow
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.2.0] - 2026-06-22
+
+### Added
+
+- **`vector-migrate --doctor`** — an environment diagnostic that runs every
+  prerequisite check and prints a `[✓]/[✗]` PASS/FAIL report with a one-line fix
+  for each failure, changing nothing. It checks: `git`, `git-filter-repo`, the
+  `ssh` client, the SSH keys in `~/.ssh` (listing them all), GitHub SSH
+  authentication (tries every key; on failure lists each key, the OS-correct
+  print command, and `https://github.com/settings/keys`), `github.com` in
+  `known_hosts`, `fsutil` on Windows, and write access to the current directory.
+  Exits non-zero if any check fails (CI-friendly), and uses ASCII marks on
+  Windows for cmd code-page safety — so a user can prove whether a failure is
+  their environment or Vector.
+
 ## [2.1.1] - 2026-06-22
 
 ### Changed
@@ -89,6 +104,7 @@ automatically, with cross-platform, OS-aware guidance.
 - Keyless or mis-configured-SSH runs fail fast with guidance instead of failing at
   the push after a full mirror clone.
 
+[2.2.0]: https://github.com/YRACHEK101/Vector/releases/tag/v2.2.0
 [2.1.1]: https://github.com/YRACHEK101/Vector/releases/tag/v2.1.1
 [2.1.0]: https://github.com/YRACHEK101/Vector/releases/tag/v2.1.0
 [2.0.0]: https://github.com/YRACHEK101/Vector/releases/tag/v2.0.0
