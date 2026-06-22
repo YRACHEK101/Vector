@@ -1,0 +1,49 @@
+name: Release
+
+# Publish to npm with build provenance whenever a v* tag is pushed
+# (e.g. `git tag v2.0.1 && git push origin v2.0.1`), or on manual dispatch.
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  id-token: write   # REQUIRED for npm provenance (OIDC); do not remove
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          registry-url: 'https://registry.npmjs.org'
+
+      - name: Install git-filter-repo (required by the test suite)
+        run: sudo apt-get update && sudo apt-get install -y git-filter-repo
+
+      - name: Configure a git identity (integration tests create commits)
+        run: |
+          git config --global user.name  "Vector CI"
+          git config --global user.email "ci@vector.invalid"
+          git config --global init.defaultBranch main
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Test
+        run: npm test
+
+      # `npm publish --provenance` attaches a signed build attestation linking the
+      # published tarball to this repo + workflow run. Requires id-token: write and
+      # an Automation token in the NPM_TOKEN repo secret.
+      - name: Publish to npm with provenance
+        run: npm publish --provenance --access public
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
