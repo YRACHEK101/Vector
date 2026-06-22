@@ -14,7 +14,8 @@ import {
 } from './team.js';
 import {
   checkGithubSsh, checkAzureSsh, SSH_SETUP_HELP,
-  findSshKey, sshKeyGuidance, isAzureSshUrl, azureSshHost, trustHost,
+  findSshKey, sshKeyGuidance, sshAuthFailureGuidance, listLocalSshKeys,
+  isAzureSshUrl, azureSshHost, trustHost,
 } from './ssh.js';
 
 const noop = () => {};
@@ -321,12 +322,16 @@ export async function ensureSshReady(cfg, ui = defaultUi, deps = {}) {
   if (needAzure) trust(azureSshHost(cfg.azureUrl), deps);
 
   const keyPath = explicitKey || undefined; // undefined → ssh offers agent + all keys
+  const listKeys = deps.listLocalSshKeys || listLocalSshKeys;
 
-  // 3a. GitHub auth — always required for the push. Fails only if NO key authenticates.
+  // 3a. GitHub auth — always required for the push. Fails only if NO key authenticates;
+  //     the message then names every local key and exactly where to register one.
   if (needGithub) {
     const check = deps.githubCheck || cfg._sshCheck || checkGithubSsh;
     const res = await check({ env: cfg.gitEnv, keyPath });
-    if (!res.ok) throw new Error(`GitHub SSH preflight failed: ${res.reason}\n\n${sshKeyGuidance({ platform })}`);
+    if (!res.ok) {
+      throw new Error(sshAuthFailureGuidance({ platform, keys: listKeys({}), service: 'github', reason: res.reason }));
+    }
     ui.ok(`GitHub SSH OK — authenticated as ${res.user || 'your account'}.`);
   }
 
@@ -336,12 +341,7 @@ export async function ensureSshReady(cfg, ui = defaultUi, deps = {}) {
     const check = deps.azureCheck || cfg._azureSshCheck || checkAzureSsh;
     const res = await check({ env: cfg.gitEnv, host, keyPath });
     if (!res.ok) {
-      throw new Error(
-        `Azure DevOps SSH preflight failed: ${res.reason}\n\nFix it one of two ways:\n` +
-        '  - Add your SSH public key to Azure DevOps -> User settings -> SSH public keys, or\n' +
-        '  - Switch the Azure source URL to HTTPS, e.g.\n' +
-        '      https://ORG@dev.azure.com/ORG/PROJECT/_git/REPO',
-      );
+      throw new Error(sshAuthFailureGuidance({ platform, keys: listKeys({}), service: 'azure', reason: res.reason }));
     }
     ui.ok(`Azure DevOps SSH OK${res.user ? ` — ${res.user}` : ''}.`);
   } else if (cfg.azureUrl) {

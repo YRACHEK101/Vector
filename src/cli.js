@@ -14,7 +14,7 @@ import { migrate, ensureSshReady, syncSourceMirror, listAuthors, listBranches } 
 import { parseMailmap, entriesToMailmap, summarizeMapping } from './team.js';
 import {
   checkGithubSsh, checkAzureSsh, formatSshStatus,
-  findSshKey, sshKeyGuidance, isAzureSshUrl, azureSshHost,
+  findSshKey, listLocalSshKeys, sshKeyGuidance, isAzureSshUrl, azureSshHost,
 } from './ssh.js';
 
 function version() {
@@ -171,9 +171,15 @@ function runCheck(cfg) {
   // SSH status — Vector authenticates over SSH, so verify a key exists and that
   // GitHub (always) and Azure (only when the source url is SSH) accept it.
   ui.step('SSH access');
+  const localKeys = listLocalSshKeys({});
   const key = findSshKey({ explicitKey: final.sshKey });
-  if (key.found) ui.ok(`SSH key:     present (${key.source === 'agent' ? 'ssh-agent' : key.source})`);
-  else { ui.warn('SSH key:     NONE FOUND'); for (const line of sshKeyGuidance({}).split('\n')) ui.warn(`  ${line}`); }
+  if (key.found) {
+    ui.ok(`SSH key:     present${localKeys.length ? ` (${localKeys.join(', ')})` : ' (ssh-agent)'}`);
+    ui.dim('             any one of these can work — it must be registered with GitHub/Azure');
+  } else {
+    ui.warn('SSH key:     NONE FOUND');
+    for (const line of sshKeyGuidance({}).split('\n')) ui.warn(`  ${line}`);
+  }
 
   const ssh = formatSshStatus(checkGithubSsh());
   for (const line of ssh.lines) (ssh.level === 'ok' ? ui.ok : ui.warn)(line);

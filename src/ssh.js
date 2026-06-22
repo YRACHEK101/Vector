@@ -10,7 +10,7 @@
 // pure function; the process call is injectable for offline tests.
 // ─────────────────────────────────────────────────────────────────────────────
 import { spawnSync } from 'node:child_process';
-import { existsSync, readFileSync, appendFileSync, mkdirSync } from 'node:fs';
+import { existsSync, readFileSync, appendFileSync, mkdirSync, readdirSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join, dirname } from 'node:path';
 
@@ -143,6 +143,60 @@ export function sshKeyGuidance({ platform = process.platform } = {}) {
     '',
     '4. Re-run Vector.',
   ].join('\n');
+}
+
+/**
+ * Enumerate the PUBLIC keys present in ~/.ssh: the standard pairs
+ * (id_ed25519/id_rsa/id_ecdsa/id_dsa) plus any other `*.pub`. Returns sorted
+ * `.pub` filenames. IO is injectable for offline tests.
+ * @returns {string[]}
+ */
+export function listLocalSshKeys({ home, fileExists = existsSync, readdir } = {}) {
+  const dir = join(home || homedir(), '.ssh');
+  const names = new Set();
+  for (const n of ['id_ed25519', 'id_rsa', 'id_ecdsa', 'id_dsa']) {
+    if (fileExists(join(dir, n)) || fileExists(join(dir, `${n}.pub`))) names.add(`${n}.pub`);
+  }
+  const list = readdir || ((d) => { try { return readdirSync(d); } catch { return []; } });
+  for (const f of list(dir)) {
+    if (typeof f === 'string' && f.endsWith('.pub')) names.add(f);
+  }
+  return [...names].sort();
+}
+
+/**
+ * Pure: precise guidance when SSH auth FAILS while a key exists — i.e. none of
+ * the user's local keys is registered with the service. Names every local public
+ * key with the exact OS-correct print command, says plainly that NONE is
+ * registered, and links to the right place to register ONE of them. `service` is
+ * 'github' (default) or 'azure'.
+ */
+export function sshAuthFailureGuidance({ platform = process.platform, keys = [], service = 'github', reason = '' } = {}) {
+  const isWin = platform === 'win32';
+  const printCmd = (name) => (isWin ? `type %USERPROFILE%\\.ssh\\${name}` : `cat ~/.ssh/${name}`);
+  const svc = service === 'azure' ? 'Azure DevOps' : 'GitHub';
+  const lines = [`${svc} SSH preflight failed: ${reason || 'Permission denied (publickey).'}`, ''];
+
+  if (keys.length) {
+    lines.push(`These local public key(s) were found, but NONE of them is registered with your ${svc} account:`);
+    for (const k of keys) lines.push(`     ${printCmd(k)}      # prints ${k}`);
+    lines.push('', `You must register ONE of the keys above with ${svc}:`);
+  } else {
+    lines.push(`ssh offered an agent identity that ${svc} rejected, and no public key files were found in ~/.ssh.`);
+    lines.push('List your agent keys with:  ssh-add -l');
+    lines.push('', `Register the matching public key with ${svc}:`);
+  }
+
+  if (service === 'azure') {
+    lines.push('     Azure DevOps -> User settings -> SSH public keys -> New Key');
+    lines.push('', 'Switch the Azure source URL to HTTPS to skip Azure SSH entirely, e.g.');
+    lines.push('     https://ORG@dev.azure.com/ORG/PROJECT/_git/REPO');
+  } else {
+    lines.push('     GitHub -> Settings -> SSH and GPG keys -> New SSH key');
+    lines.push('     Direct link: https://github.com/settings/keys');
+  }
+  lines.push('', 'Then re-run Vector.');
+  return lines.join('\n');
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
