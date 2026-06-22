@@ -10,6 +10,7 @@ import {
   configFromEnv, mergeConfigs, finalizeConfig, validateRun, parseBranches, parseEmails,
 } from './config.js';
 import { checkPrerequisites } from './prereqs.js';
+import { doctor } from './doctor.js';
 import { migrate, ensureSshReady, syncSourceMirror, listAuthors, listBranches } from './pipeline.js';
 import { parseMailmap, entriesToMailmap, summarizeMapping } from './team.js';
 import {
@@ -58,6 +59,7 @@ ${c.bold('GENERAL')}
   -y, --yes                                     Assume "yes" at the confirm gate
   --non-interactive                             No prompts (mapping must be complete)
   --check, --dry-run                            Validate tools + config, change nothing
+  --doctor                                      Diagnose your environment (PASS/FAIL + fixes), change nothing
   -h, --help / -V, --version
 `;
 
@@ -70,7 +72,7 @@ const VALUE_FLAGS = {
 
 export function parseArgs(argv) {
   const opts = {
-    help: false, version: false, check: false, force: false,
+    help: false, version: false, check: false, doctor: false, force: false,
     assumeYes: false, nonInteractive: false, allBranches: false,
     interactive: !!process.stdin.isTTY,
     overrides: {}, branchList: [], mapList: [],
@@ -80,6 +82,7 @@ export function parseArgs(argv) {
     if (a === '-h' || a === '--help') opts.help = true;
     else if (a === '-V' || a === '--version') opts.version = true;
     else if (a === '--check' || a === '--dry-run') opts.check = true;
+    else if (a === '--doctor') opts.doctor = true;
     else if (a === '--force') opts.force = true;
     else if (a === '-y' || a === '--yes') opts.assumeYes = true;
     else if (a === '--non-interactive') { opts.nonInteractive = true; opts.interactive = false; }
@@ -200,6 +203,7 @@ export async function run(argv) {
   const opts = parseArgs(argv);
   if (opts.help) { console.log(HELP); return; }
   if (opts.version) { console.log(version()); return; }
+  if (opts.doctor) { const res = doctor({ version: version() }); if (!res.ok) process.exitCode = 1; return; }
 
   ui.banner('🧭 vector-migrate — Azure DevOps → GitHub migration');
 
