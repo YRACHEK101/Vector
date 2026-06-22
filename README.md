@@ -134,6 +134,52 @@ New to this on Windows? Here is everything from zero. Run the commands in **Comm
 - Azure over HTTPS is usually easier than SSH — if Azure SSH gives you trouble, use the HTTPS URL.
 - If anything goes wrong, run `npx vector-migrate@latest --doctor` to see exactly what's missing.
 
+### macOS — from scratch (step by step)
+
+New to this on macOS? Everything from zero. Run the commands in **Terminal**.
+
+**1. Install Node.js.** Download the LTS build from nodejs.org, or `brew install node`. Verify: `node -v` and `npm -v`.
+
+**2. Install Git.** Often preinstalled. If not: `xcode-select --install` or `brew install git`. Verify: `git --version`.
+
+**3. Install git-filter-repo.** `brew install git-filter-repo` (or `pip3 install git-filter-repo`). Verify: `git filter-repo --version`.
+
+**4. Create an SSH key.** `ssh-keygen -t ed25519 -C "your-email@example.com"` — press Enter at every prompt for the defaults.
+
+**5. Register the key with GitHub.** Copy it: `pbcopy < ~/.ssh/id_ed25519.pub` (or `cat ~/.ssh/id_ed25519.pub` and copy the line manually). Go to https://github.com/settings/keys → New SSH key → paste → Add SSH key.
+
+**6. Register the same key with Azure DevOps.** Avatar (top right) → User settings → SSH public keys → New Key → paste the same key → Save.
+
+**7. Verify SSH works.** `ssh -T git@github.com` → `Hi <username>! You've successfully authenticated...`. If asked "continue connecting?", type `yes`.
+
+**8. Run Vector.** `npx vector-migrate@latest`. Answer the prompts: Azure URL (HTTPS is easiest: `https://ORG@dev.azure.com/ORG/PROJECT/_git/REPO`), GitHub destination (`git@github.com:USERNAME/REPO.git`), and a short project slug.
+
+### Linux — from scratch (step by step)
+
+New to this on Linux? Everything from zero. Commands shown for the common distros.
+
+**1. Install Node.js.** Easiest is nvm: `curl -o- https://raw.githubusercontent.com/nvm-sh/nvm/v0.40.1/install.sh | bash` then `nvm install --lts`. Or per distro — Debian/Ubuntu (NodeSource), Fedora `sudo dnf install nodejs`, Arch `sudo pacman -S nodejs npm`. Verify: `node -v` and `npm -v`.
+
+**2. Install Git.** Debian/Ubuntu `sudo apt install git`; Fedora `sudo dnf install git`; Arch `sudo pacman -S git`. Verify: `git --version`.
+
+**3. Install git-filter-repo.** `pip3 install git-filter-repo`, or Debian/Ubuntu `sudo apt install git-filter-repo`, Fedora `sudo dnf install git-filter-repo`. Verify: `git filter-repo --version`.
+
+**4. Create an SSH key.** `ssh-keygen -t ed25519 -C "your-email@example.com"` — press Enter at every prompt.
+
+**5. Register the key with GitHub.** Show it: `cat ~/.ssh/id_ed25519.pub` (or copy with `xclip -sel clip < ~/.ssh/id_ed25519.pub`), then go to https://github.com/settings/keys → New SSH key → paste → Add SSH key.
+
+**6. Register the same key with Azure DevOps.** Avatar (top right) → User settings → SSH public keys → New Key → paste the same key → Save.
+
+**7. Verify SSH works.** `ssh -T git@github.com` → `Hi <username>! You've successfully authenticated...`. If asked, type `yes`.
+
+**8. Run Vector.** `npx vector-migrate@latest`. Answer the prompts (Azure URL — HTTPS easiest, GitHub destination, short slug).
+
+**Notes (macOS & Linux)**
+- The key must be registered on **both** GitHub (for the push) and Azure (for the fetch); missing either side will fail.
+- Steps 1–7 are one-time setup. After that, each migration is just step 8.
+- Azure over HTTPS is usually easier than SSH — if Azure SSH gives trouble, use the HTTPS URL.
+- If anything goes wrong, run `npx vector-migrate@latest --doctor` to see exactly what's missing.
+
 ## Solo and team migration
 
 Vector has **one auto-detecting flow** — there is no mode to choose. After it mirrors the Azure repo, it scans every author across all branches and shows you who's there:
