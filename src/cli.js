@@ -10,8 +10,9 @@ import {
   configFromEnv, mergeConfigs, finalizeConfig, validateRun, parseBranches, parseEmails,
 } from './config.js';
 import { checkPrerequisites } from './prereqs.js';
-import { migrate, syncSourceMirror, listAuthors, listBranches } from './pipeline.js';
+import { migrate, ensureGithubSsh, syncSourceMirror, listAuthors, listBranches } from './pipeline.js';
 import { parseMailmap, entriesToMailmap, summarizeMapping } from './team.js';
+import { checkGithubSsh, formatSshStatus } from './ssh.js';
 
 function version() {
   try {
@@ -164,6 +165,11 @@ function runCheck(cfg) {
   // Report config issues (a CI run would use --non-interactive, so check strictly).
   for (const e of validateRun(final, { interactive: false }).errors) ui.warn(`• ${e}`);
 
+  // GitHub SSH status — Vector pushes over SSH, so verify the key is registered.
+  ui.step('GitHub SSH access');
+  const ssh = formatSshStatus(checkGithubSsh());
+  for (const line of ssh.lines) (ssh.level === 'ok' ? ui.ok : ui.warn)(line);
+
   if (!pre.ok) { process.exitCode = 1; ui.err('\nPreflight FAILED — install the missing tool(s) above.'); }
   else ui.ok('\n✅ Preflight OK — no changes were made.');
 }
@@ -190,6 +196,13 @@ export async function run(argv) {
   }
   cfg = withMailmapFile(cfg);
   let final = finalizeConfig(cfg);
+
+  // ── Fail-fast: verify GitHub SSH before any mirror/rewrite work ──
+  // (skips automatically for non-GitHub-SSH destinations). On success we mark the
+  // config so migrate() doesn't re-probe the network a second time.
+  await ensureGithubSsh(final, ui);
+  cfg = mergeConfigs(cfg, { skipSshPreflight: true });
+  final = finalizeConfig(cfg);
 
   // ── Steps 3–5 (interactive): mirror → scan → map identities ──
   const haveMapping = !!(final.mailmapText && final.mailmapText.trim());

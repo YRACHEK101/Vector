@@ -204,6 +204,25 @@ npx vector-migrate
 
 ---
 
+## Requirements: GitHub SSH access
+
+Vector pushes to GitHub over **SSH** (it never touches Personal Access Tokens), so you need an SSH key registered on your GitHub account before migrating. If a key isn't set up, the mirror and rewrite still run but the final push fails with `Permission denied (publickey)` — so Vector checks this up front and stops early with guidance.
+
+Set it up once:
+
+```bash
+ssh-keygen -t ed25519 -C "you@example.com"      # press Enter for the defaults
+# Add the public key to GitHub → Settings → SSH and GPG keys → New SSH key:
+cat ~/.ssh/id_ed25519.pub
+ssh -T git@github.com                            # should greet you by username
+```
+
+> A successful `ssh -T git@github.com` prints `Hi <user>! You've successfully authenticated…` **and exits with code 1** — that's normal for GitHub. Vector detects success by the message, not the exit code.
+
+Run `vector-migrate --check` to verify everything at once — it reports whether `git` and `git-filter-repo` are installed **and** whether your GitHub SSH access works (printing these exact setup steps if it doesn't). It changes nothing.
+
+---
+
 ## Incremental Syncs (re-running safely)
 
 Migration is rarely one-and-done. Re-run Vector any time new commits land on Azure — it's incremental and strictly **non-destructive**:

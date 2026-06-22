@@ -9,6 +9,7 @@ import { existsSync, writeFileSync, rmSync } from 'node:fs';
 import { run, query, status, gitDir } from './git.js';
 import { buildMailmap } from './config.js';
 import { parseBranchRefs, resolveBranches, parseIdentities } from './team.js';
+import { checkGithubSsh, SSH_SETUP_HELP } from './ssh.js';
 
 const noop = () => {};
 const defaultUi = { step: noop, info: noop, ok: noop, warn: noop, spinner: () => ({ start() { return this; }, succeed() { return this; }, fail() { return this; }, stop() { return this; } }) };
@@ -153,8 +154,32 @@ export function verify(cfg, branches = cfg.branches) {
   });
 }
 
+/** Does the destination point at GitHub over SSH (so the SSH preflight applies)? */
+export function isGithubSshUrl(url = '') {
+  return /^(git@github\.com:|ssh:\/\/git@github\.com\/)/i.test(String(url));
+}
+
+/**
+ * Fail-fast GitHub SSH preflight, run before any mirror/rewrite/push work. Skips
+ * non-GitHub-SSH targets (e.g. the local stand-in repos used in tests) and when
+ * explicitly disabled. The checker is injectable via cfg._sshCheck for offline tests.
+ * @returns {Promise<{ok:boolean, user?:string, reason?:string, skipped?:boolean}>}
+ */
+export async function ensureGithubSsh(cfg, ui = defaultUi) {
+  if (cfg.skipSshPreflight) return { ok: true, skipped: true };
+  if (!isGithubSshUrl(cfg.githubSsh)) return { ok: true, skipped: true };
+  const check = cfg._sshCheck || checkGithubSsh;
+  const res = await check({ env: cfg.gitEnv });
+  if (!res.ok) {
+    throw new Error(`GitHub SSH preflight failed: ${res.reason}\n\n${SSH_SETUP_HELP}`);
+  }
+  ui.ok(`GitHub SSH OK — authenticated as ${res.user || 'your account'}.`);
+  return res;
+}
+
 /** Full pipeline: idempotent, incremental, non-destructive. */
 export async function migrate(cfg, ui = defaultUi) {
+  await ensureGithubSsh(cfg, ui); // stop early if SSH isn't set up — never push-fail late
   const sync = await syncSourceMirror(cfg, ui);
   await buildStaging(cfg, ui);
   const rewrite = await rewriteHistory(cfg, ui);
