@@ -99,3 +99,22 @@ export async function confirmProceed(message = 'Proceed?') {
   const { ok } = await inquirer.prompt([{ type: 'confirm', name: 'ok', message, default: false }]);
   return ok;
 }
+
+/**
+ * Ask how to handle case-insensitive / directory-file branch conflicts. The
+ * default is the safe, data-preserving choice: rename every conflicting branch.
+ * @returns {Promise<'rename'|'skip'|'abort'>}
+ */
+export async function chooseConflictResolution(conflicts = []) {
+  const inquirer = await loadInquirer();
+  const { choice } = await inquirer.prompt([{
+    type: 'list', name: 'choice', default: 'rename',
+    message: `${conflicts.length} branch-name conflict(s) would break the rewrite on this filesystem. How should Vector handle them?`,
+    choices: [
+      { name: 'Rename the conflicting branch(es) with a -N suffix (migrate everything)', value: 'rename' },
+      { name: 'Skip the conflicting branch(es) (migrate the rest)', value: 'skip' },
+      { name: 'Abort (re-run on Linux/WSL, or narrow with --branch)', value: 'abort' },
+    ],
+  }]);
+  return choice;
+}

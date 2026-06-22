@@ -5,10 +5,13 @@
 // Mirrors the proven shell logic. The push DECISION is a pure function (unit
 // tested); the IO steps are integration-tested against local stand-in repos.
 // ─────────────────────────────────────────────────────────────────────────────
-import { existsSync, writeFileSync, rmSync } from 'node:fs';
+import { existsSync, writeFileSync, rmSync, mkdirSync } from 'node:fs';
 import { run, query, status, gitDir } from './git.js';
 import { buildMailmap } from './config.js';
-import { parseBranchRefs, resolveBranches, parseIdentities } from './team.js';
+import {
+  parseBranchRefs, resolveBranches, parseIdentities,
+  detectBranchConflicts, planConflictResolution,
+} from './team.js';
 import {
   checkGithubSsh, checkAzureSsh, SSH_SETUP_HELP,
   findSshKey, sshKeyGuidance, isAzureSshUrl, azureSshHost, trustHost,
@@ -46,12 +49,94 @@ export async function syncSourceMirror(cfg, ui = defaultUi) {
   return { mode: 'initial' };
 }
 
+/**
+ * Windows-only, best-effort: make a directory's ref storage case-sensitive so
+ * "Mbouzine" and "MBouzine" can coexist as loose refs. fsutil must run on a
+ * FRESH (empty) directory before any ref is written, and may fail when the
+ * feature is unavailable or needs admin — in which case we fall through and
+ * resolve conflicts by rename/skip. Never throws.
+ * @returns {{attempted:boolean, ok:boolean, reason?:string}}
+ */
+export function enableCaseSensitivity(dir, { platform = process.platform, runner } = {}) {
+  if (platform !== 'win32') return { attempted: false, ok: false, reason: 'not-windows' };
+  try {
+    const call = runner || ((cmd, args) => status(cmd, args));
+    const code = call('fsutil', ['file', 'setCaseSensitiveInfo', dir, 'enable']);
+    return code === 0 ? { attempted: true, ok: true } : { attempted: true, ok: false, reason: `fsutil exited ${code}` };
+  } catch (e) {
+    return { attempted: true, ok: false, reason: e.message };
+  }
+}
+
 /** Step 2 — rebuild a fully-isolated rewrite copy from the source (deterministic SHAs). */
-export async function buildStaging(cfg, ui = defaultUi) {
+export async function buildStaging(cfg, ui = defaultUi, deps = {}) {
   rmSync(cfg.stagingMirror, { recursive: true, force: true });
+  // On Windows, make the staging repo's ref storage case-sensitive BEFORE the
+  // clone writes any ref, so case-only branch collisions never materialize.
+  const platform = deps.platform || process.platform;
+  let caseSensitive = { attempted: false };
+  if (platform === 'win32') {
+    mkdirSync(cfg.stagingMirror, { recursive: true });
+    caseSensitive = enableCaseSensitivity(cfg.stagingMirror, deps);
+    ui.info(caseSensitive.ok
+      ? '  Case-sensitive ref storage enabled for the staging copy.'
+      : `  Case-sensitive ref storage unavailable (${caseSensitive.reason}); will resolve any conflicts by rename/skip.`);
+  }
   const sp = ui.spinner('Building isolated rewrite staging copy').start();
   await run('git', ['clone', '--mirror', '--no-hardlinks', cfg.sourceMirror, cfg.stagingMirror], { env: cfg.gitEnv });
   sp.succeed('Staging copy ready');
+  return { caseSensitive };
+}
+
+/**
+ * Step 2.5 — detect branch-name conflicts that break git-filter-repo on
+ * case-insensitive filesystems and resolve them BEFORE the rewrite. The strategy
+ * comes from cfg._resolveConflicts (interactive); non-interactively we default to
+ * the safe, data-preserving choice: rename. Returns a report of what was done.
+ */
+export async function resolveBranchConflicts(cfg, ui = defaultUi) {
+  const dir = cfg.stagingMirror;
+  let branches = listBranches(cfg, dir);
+  const conflicts = detectBranchConflicts(branches);
+  if (!conflicts.length) return { conflicts: [], renames: [], skipped: [], strategy: 'none' };
+
+  ui.warn(`Detected ${conflicts.length} branch-name conflict(s) that break on case-insensitive (Windows) filesystems:`);
+  for (const cf of conflicts) {
+    ui.warn(`  • ${cf.type === 'case' ? 'case-only' : 'directory/file'} conflict: "${cf.a}" vs "${cf.b}"`);
+  }
+
+  // Choose a strategy: interactive resolver if one was injected, else default rename.
+  const strategy = cfg._resolveConflicts ? await cfg._resolveConflicts(conflicts) : 'rename';
+  if (strategy === 'abort') {
+    throw new Error(
+      'Aborted on branch-name conflicts. Options:\n' +
+      '  - Re-run on Linux/WSL (a case-sensitive filesystem resolves these natively), or\n' +
+      '  - Migrate fewer branches with --branch <name> to exclude the conflicting ones.',
+    );
+  }
+
+  const plan = planConflictResolution(branches, strategy);
+  if (strategy === 'skip') {
+    for (const b of plan.skipped) {
+      const sha = query('git', [...gitDir(dir), 'rev-parse', `refs/heads/${b}`]);
+      if (sha) await run('git', [...gitDir(dir), 'update-ref', '-d', `refs/heads/${b}`, sha], { env: cfg.gitEnv }).catch(noop);
+      ui.warn(`  [${b}] skipped — not migrated (conflicting branch).`);
+    }
+  } else {
+    for (const { from, to } of plan.renames) {
+      const sha = query('git', [...gitDir(dir), 'rev-parse', `refs/heads/${from}`]);
+      if (!sha) continue;
+      await run('git', [...gitDir(dir), 'update-ref', `refs/heads/${to}`, sha], { env: cfg.gitEnv });
+      await run('git', [...gitDir(dir), 'update-ref', '-d', `refs/heads/${from}`, sha], { env: cfg.gitEnv });
+      ui.ok(`  [${from}] → [${to}] (renamed to avoid the conflict; branch still migrates).`);
+    }
+  }
+
+  branches = listBranches(cfg, dir);
+  if (detectBranchConflicts(branches).length) {
+    ui.warn('  Some conflicts remain after resolution; the rewrite may still fail on this filesystem.');
+  }
+  return { conflicts: plan.conflicts, renames: plan.renames, skipped: plan.skipped, strategy };
 }
 
 /** Are any of the given emails still present anywhere in the staging history (author or committer)? */
@@ -84,7 +169,22 @@ export async function rewriteHistory(cfg, ui = defaultUi) {
     return { rewritten: false };
   }
   const sp = ui.spinner('Rewriting author/committer identities via git-filter-repo').start();
-  await run('git', [...gitDir(cfg.stagingMirror), 'filter-repo', '--mailmap', cfg.mailmapFile, '--force'], { env: cfg.gitEnv });
+  try {
+    await run('git', [...gitDir(cfg.stagingMirror), 'filter-repo', '--mailmap', cfg.mailmapFile, '--force'], { env: cfg.gitEnv });
+  } catch (e) {
+    sp.fail('History rewrite failed');
+    const detail = `${e.message || ''}\n${e.stderr || ''}`;
+    if (/cannot lock ref|reference already exists|already exists/i.test(detail)) {
+      throw new Error(
+        'git-filter-repo hit a branch-name conflict on this filesystem — two branches that ' +
+        'differ only in case, or a name that is also a path-prefix of another (e.g. "MBouzine" ' +
+        'and "MBouzine/init_repo").\n' +
+        'Vector resolves this automatically: re-run and choose Rename (default) or Skip at the ' +
+        'prompt, run on Linux/WSL, or narrow the set with --branch <name>.',
+      );
+    }
+    throw e;
+  }
   sp.succeed('History rewritten');
   if (emails.length && emailsPresent(cfg, emails)) {
     throw new Error('Safety check failed: a mapped old email still remains in history after the rewrite. Aborting before push.');
@@ -243,7 +343,10 @@ export async function ensureSshReady(cfg, ui = defaultUi, deps = {}) {
 export async function migrate(cfg, ui = defaultUi) {
   await ensureGithubSsh(cfg, ui); // stop early if SSH isn't set up — never push-fail late
   const sync = await syncSourceMirror(cfg, ui);
-  await buildStaging(cfg, ui);
+  const staging = await buildStaging(cfg, ui);
+  // Resolve case-insensitive / directory-file branch conflicts before the rewrite,
+  // so git-filter-repo can't crash with "cannot lock ref" on Windows/macOS.
+  const conflicts = await resolveBranchConflicts(cfg, ui);
   const rewrite = await rewriteHistory(cfg, ui);
   // Resolve the branch set after the mirror exists. Default = every branch;
   // an explicit --branch list narrows it; --all-branches forces all.
@@ -254,5 +357,5 @@ export async function migrate(cfg, ui = defaultUi) {
   });
   const pushes = [];
   for (const branch of branches) pushes.push(await pushBranch(cfg, branch, ui));
-  return { mode: sync.mode, rewrite, branches, pushes, verification: verify(cfg, branches) };
+  return { mode: sync.mode, rewrite, conflicts, caseSensitive: staging.caseSensitive, branches, pushes, verification: verify(cfg, branches) };
 }

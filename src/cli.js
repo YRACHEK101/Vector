@@ -269,6 +269,13 @@ export async function run(argv) {
     if (!(await confirmProceed(msg))) { ui.warn('Aborted — no changes were made.'); return; }
   }
 
+  // Interactive runs get to choose how branch-name conflicts are resolved;
+  // non-interactive runs default to the safe, data-preserving choice (rename).
+  if (opts.interactive) {
+    const { chooseConflictResolution } = await import('./wizard.js');
+    final._resolveConflicts = (conflicts) => chooseConflictResolution(conflicts);
+  }
+
   // ── Steps 3,6: mirror (idempotent) → rewrite → ancestry-aware push, all branches ──
   const result = await migrate(final, ui);
   printVerification(result);
