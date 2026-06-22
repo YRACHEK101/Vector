@@ -308,6 +308,31 @@ Windows (and default macOS) filesystems are case-insensitive, which makes git-fi
 
 ---
 
+## Diagnose your environment
+
+Not sure whether a problem is your machine or Vector? Run the built-in diagnostic. It checks everything and prints a PASS/FAIL report with the exact fix for any failing line, and it changes nothing.
+
+On **Windows**, open **Command Prompt (Run as administrator)** and run:
+
+```
+npx vector-migrate@latest --doctor
+```
+
+(On macOS/Linux, run the same command in your terminal.)
+
+`--doctor` verifies `git`, `git-filter-repo`, the `ssh` client, the SSH keys in your `~/.ssh`, and — crucially — whether one of your keys is actually **registered with GitHub**. Every line is marked `[✓]` or `[✗]`, and each `[✗]` prints exactly what to fix — on an SSH auth failure it lists each local key, the command to print it (`type %USERPROFILE%\.ssh\<name>.pub` on Windows, `cat ~/.ssh/<name>.pub` on macOS/Linux), and the registration link `https://github.com/settings/keys`. It exits non-zero if any check fails, so it is CI-friendly too.
+
+Prefer a global install?
+
+```
+npm i -g vector-migrate@latest
+vector-migrate --doctor
+```
+
+Always use `@latest`: `npx` can otherwise serve a cached older build and hide a fix you already have.
+
+---
+
 ## Incremental Syncs (re-running safely)
 
 Migration is rarely one-and-done. Re-run Vector any time new commits land on Azure — it's incremental and strictly **non-destructive**:
