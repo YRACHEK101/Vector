@@ -43,7 +43,7 @@ Moving from a closed enterprise ecosystem (Azure DevOps) to a public one (GitHub
 
 Inside a company you commit with a corporate work email (`you@bigcorp.com`). GitHub only lights up your contribution graph for commits whose author email is **verified on your account** — so a standard migration carries every one of those commits over as an unattributed "ghost." Months or years of real work simply never show up as green squares.
 
-Vector rewrites **only your old corporate identity** to your personal, verified identity — leaving teammates' commits untouched — so your history counts again, at its original dates.
+By default, Vector rewrites **your** old corporate identity to your personal, verified one and leaves everyone else untouched — so your history counts again, at its original dates. Migrating a shared repo? The same flow can remap **multiple contributors across every branch**, so your whole team keeps attribution (see [Solo and team migration](#solo-and-team-migration)).
 
 ### The Security Token Leak
 
@@ -62,14 +62,16 @@ Vector eliminates the bottleneck by streaming over a **single persistent raw-SSH
 ## Quick Start
 
 ```bash
-# 1. Install the one system dependency (see OS table below)
-brew install git-filter-repo          # macOS example
+# 1. Install the one system dependency for your OS:
+brew install git-filter-repo                 # macOS
+sudo apt install -y git-filter-repo          # Linux (Debian/Ubuntu) — or: pip3 install --user git-filter-repo
+pip install git-filter-repo                  # Windows (needs Python; run in Git Bash or WSL)
 
 # 2. Run the wizard — it walks you through everything
 npx vector-migrate
 ```
 
-That's it. The interactive wizard prompts for your Azure source, GitHub destination, and identity details, then does the rest.
+That's it. The interactive wizard prompts for your Azure source, GitHub destination, and identity details, then does the rest. See [Prerequisites: git-filter-repo](#prerequisites-git-filter-repo) for per-OS detail.
 
 ---
 
@@ -94,11 +96,45 @@ Once installed, the command is available anywhere:
 
 ```bash
 vector-migrate                 # interactive, colored wizard
-vector-migrate --check         # preflight: validate tools + config, change nothing
+vector-migrate --check         # preflight: validate tools, config + GitHub SSH; changes nothing
 vector-migrate --help          # full flag reference
 ```
 
-> **Tip:** Run `vector-migrate --check` first — it verifies that `git` and `git-filter-repo` are installed and prints exact, OS-specific install instructions if anything is missing.
+> **Tip:** Run `vector-migrate --check` first — it verifies that `git` and `git-filter-repo` are installed **and that your GitHub SSH access works**, and prints exact, OS-specific setup instructions if anything is missing.
+
+---
+
+## Solo and team migration
+
+Vector has **one auto-detecting flow** — there is no mode to choose. After it mirrors the Azure repo, it scans every author across all branches and shows you who's there:
+
+- **Solo (the default).** Vector maps **you** — matched to your git identity, or picked from the detected list — to your new verified identity and **keeps everyone else unchanged**. Your green squares come back; teammates' commits stay theirs.
+- **Team.** At the mapping step you can also remap **additional contributors** — each to a new name/email, or skip them to keep their old identity. Every mapped developer keeps attribution, at original dates.
+
+Solo is just this flow with a single mapping; team is the same flow with more. By **default every branch** is migrated (`--all-branches` is the default — use `--branch` to narrow to specific ones).
+
+For CI, supply the full mapping up front instead of answering prompts — a version-controlled mailmap file, or repeatable inline maps:
+
+```bash
+# A mailmap file (one line per developer) — best for CI:
+vector-migrate --non-interactive \
+  --azure-url  "https://org@dev.azure.com/org/Project/_git/Repo" \
+  --github-ssh "git@github.com:acme/repo.git" \
+  --mailmap ./team.mailmap --all-branches
+
+# …or inline, repeatable:
+vector-migrate --non-interactive \
+  --azure-url "…" --github-ssh "git@github.com:acme/repo.git" \
+  --map "alice@oldcorp.com=Alice New <alice@newco.com>" \
+  --map "bob@oldcorp.com=Bob New <bob@newco.com>"
+```
+
+`team.mailmap` uses git's standard mailmap format:
+
+```
+Alice New <alice@newco.com> <alice@oldcorp.com>
+Bob New <bob@newco.com> <bob@oldcorp.com>
+```
 
 ---
 
@@ -135,17 +171,22 @@ vector-migrate --non-interactive
 
 | Flag | Env var | Meaning |
 | --- | --- | --- |
-| `--azure-url` | `AZURE_URL` | Source Azure DevOps clone URL |
+| `--azure-url` | `AZURE_URL` | Source Azure DevOps repo URL |
 | `--github-ssh` | `GITHUB_SSH` | Destination GitHub repo (SSH form) |
-| `--old-email` | `OLD_EMAIL` | Old corporate email in your commits |
-| `--extra-old-emails` | `EXTRA_OLD_EMAILS` | More old emails of yours (comma-separated) |
-| `--new-name` | `NEW_NAME` | New author name / GitHub username |
-| `--new-email` | `NEW_EMAIL` | New GitHub-verified email |
-| `--project` | `PROJECT` | Local folder slug (auto-derived) |
-| `--branch` / `--branches` | `PUSH_BRANCHES` | Branch(es) to sync (default `["master", "main"]`) |
 | `--ssh-key` | `SSH_KEY` | Private key for the SSH push |
+| `--mailmap <path>` | `MAILMAP` | git mailmap file — full multi-author mapping (ideal for CI) |
+| `--map "old=New <new>"` | `MAPS` | Inline identity mapping; **repeatable** |
+| `--old-email` | `OLD_EMAIL` | Legacy single-identity: your old corporate email… |
+| `--new-name` | `NEW_NAME` | …mapped to this author name |
+| `--new-email` | `NEW_EMAIL` | …and this verified GitHub email |
+| `--extra-old-emails` | `EXTRA_OLD_EMAILS` | More old emails of yours (comma-separated) |
+| `--branch <name>` | `PUSH_BRANCHES` | Limit to specific branch(es); **repeatable** (also `--branches "a,b"`). **Default: all branches** |
+| `--all-branches` | `ALL_BRANCHES` | Migrate every branch (the default) |
 | `--force` | — | Allow force-push **only** on a true divergence |
-| `--check` | — | Validate tools + config, then exit |
+| `--non-interactive` | — | Skip all prompts (the mapping must be complete) |
+| `-y`, `--yes` | — | Assume "yes" at the confirm gate |
+| `--check` | — | Validate tools, config **and GitHub SSH access**, then exit |
+| `--project` | `PROJECT` | Local folder slug (auto-derived) |
 
 ---
 
