@@ -10,9 +10,12 @@ import {
   configFromEnv, mergeConfigs, finalizeConfig, validateRun, parseBranches, parseEmails,
 } from './config.js';
 import { checkPrerequisites } from './prereqs.js';
-import { migrate, ensureGithubSsh, syncSourceMirror, listAuthors, listBranches } from './pipeline.js';
+import { migrate, ensureSshReady, syncSourceMirror, listAuthors, listBranches } from './pipeline.js';
 import { parseMailmap, entriesToMailmap, summarizeMapping } from './team.js';
-import { checkGithubSsh, formatSshStatus } from './ssh.js';
+import {
+  checkGithubSsh, checkAzureSsh, formatSshStatus,
+  findSshKey, sshKeyGuidance, isAzureSshUrl, azureSshHost,
+} from './ssh.js';
 
 function version() {
   try {
@@ -165,10 +168,23 @@ function runCheck(cfg) {
   // Report config issues (a CI run would use --non-interactive, so check strictly).
   for (const e of validateRun(final, { interactive: false }).errors) ui.warn(`• ${e}`);
 
-  // GitHub SSH status — Vector pushes over SSH, so verify the key is registered.
-  ui.step('GitHub SSH access');
+  // SSH status — Vector authenticates over SSH, so verify a key exists and that
+  // GitHub (always) and Azure (only when the source url is SSH) accept it.
+  ui.step('SSH access');
+  const key = findSshKey({ explicitKey: final.sshKey });
+  if (key.found) ui.ok(`SSH key:     present (${key.source === 'agent' ? 'ssh-agent' : key.source})`);
+  else { ui.warn('SSH key:     NONE FOUND'); for (const line of sshKeyGuidance({}).split('\n')) ui.warn(`  ${line}`); }
+
   const ssh = formatSshStatus(checkGithubSsh());
   for (const line of ssh.lines) (ssh.level === 'ok' ? ui.ok : ui.warn)(line);
+
+  if (isAzureSshUrl(final.azureUrl)) {
+    const az = checkAzureSsh({ host: azureSshHost(final.azureUrl) });
+    if (az.ok) ui.ok('Azure SSH:   OK');
+    else ui.warn(`Azure SSH:   FAILED — ${az.reason}`);
+  } else if (final.azureUrl) {
+    ui.ok('Azure SSH:   skipped (source url is HTTPS — only GitHub SSH is needed)');
+  }
 
   if (!pre.ok) { process.exitCode = 1; ui.err('\nPreflight FAILED — install the missing tool(s) above.'); }
   else ui.ok('\n✅ Preflight OK — no changes were made.');
@@ -197,10 +213,12 @@ export async function run(argv) {
   cfg = withMailmapFile(cfg);
   let final = finalizeConfig(cfg);
 
-  // ── Fail-fast: verify GitHub SSH before any mirror/rewrite work ──
-  // (skips automatically for non-GitHub-SSH destinations). On success we mark the
-  // config so migrate() doesn't re-probe the network a second time.
-  await ensureGithubSsh(final, ui);
+  // ── Fail-fast SSH preflight before any mirror/rewrite work ──
+  // Detects a missing key (stops with OS-specific ssh-keygen guidance), trusts
+  // host keys, and verifies GitHub auth (always) + Azure auth (only when the
+  // source url is SSH). Skips automatically for non-SSH targets. On success we
+  // mark the config so migrate() doesn't re-probe the network a second time.
+  await ensureSshReady(final, ui);
   cfg = mergeConfigs(cfg, { skipSshPreflight: true });
   final = finalizeConfig(cfg);
 

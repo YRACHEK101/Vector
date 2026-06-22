@@ -131,10 +131,13 @@ export function finalizeConfig(cfg, { cwd = process.cwd() } = {}) {
   const project = cfg.project || deriveProjectSlug(cfg.githubSsh) || 'repo';
   const allOldEmails = parseEmails([cfg.oldEmail, ...(cfg.extraOldEmails || [])]);
   const sshKey = cfg.sshKey || '';
+  // accept-new trusts a never-before-seen host key on first contact without a
+  // prompt, so a fresh machine's clone/push won't die on "Host key verification
+  // failed" in BatchMode. (The preflight also seeds known_hosts via ssh-keyscan.)
   const gitEnv = {
     GIT_SSH_COMMAND: sshKey
-      ? `ssh -i ${sshKey} -o BatchMode=yes -o IdentitiesOnly=yes`
-      : 'ssh -o BatchMode=yes',
+      ? `ssh -i ${sshKey} -o BatchMode=yes -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new`
+      : 'ssh -o BatchMode=yes -o StrictHostKeyChecking=accept-new',
   };
 
   // Branch scope. The pipeline default is EVERY branch (resolved after the mirror

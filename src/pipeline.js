@@ -9,7 +9,10 @@ import { existsSync, writeFileSync, rmSync } from 'node:fs';
 import { run, query, status, gitDir } from './git.js';
 import { buildMailmap } from './config.js';
 import { parseBranchRefs, resolveBranches, parseIdentities } from './team.js';
-import { checkGithubSsh, SSH_SETUP_HELP } from './ssh.js';
+import {
+  checkGithubSsh, checkAzureSsh, SSH_SETUP_HELP,
+  findSshKey, sshKeyGuidance, isAzureSshUrl, azureSshHost, trustHost,
+} from './ssh.js';
 
 const noop = () => {};
 const defaultUi = { step: noop, info: noop, ok: noop, warn: noop, spinner: () => ({ start() { return this; }, succeed() { return this; }, fail() { return this; }, stop() { return this; } }) };
@@ -175,6 +178,65 @@ export async function ensureGithubSsh(cfg, ui = defaultUi) {
   }
   ui.ok(`GitHub SSH OK — authenticated as ${res.user || 'your account'}.`);
   return res;
+}
+
+/**
+ * v2 — the full SSH preflight, run BEFORE any mirror/rewrite/push work:
+ *   1. a usable SSH key must exist locally (else print OS-specific ssh-keygen
+ *      guidance and STOP, so we never clone for minutes then fail at the push);
+ *   2. trust the relevant host keys non-interactively (github.com always when
+ *      the destination is GitHub SSH; the Azure SSH host only when the SOURCE
+ *      url is SSH);
+ *   3. verify auth: GitHub for the push, Azure only when its url is SSH. An
+ *      HTTPS Azure url skips every Azure SSH check.
+ * All IO (key lookup, host trust, both checkers) is injectable via `deps`/cfg for
+ * offline tests. Returns `{ok, skipped?}` and throws with an exact fix otherwise.
+ */
+export async function ensureSshReady(cfg, ui = defaultUi, deps = {}) {
+  if (cfg.skipSshPreflight) return { ok: true, skipped: true };
+  const platform = deps.platform || process.platform;
+
+  // 1. Local key must exist. This guard runs regardless of transport so a
+  //    keyless machine is caught immediately, before the long clone.
+  const key = (deps.findSshKey || findSshKey)({ explicitKey: cfg.sshKey });
+  if (!key.found) throw new Error(sshKeyGuidance({ platform }));
+  ui.ok(`SSH key detected (${key.source === 'agent' ? 'ssh-agent' : key.path || key.source}).`);
+
+  const needGithub = isGithubSshUrl(cfg.githubSsh); // destination push is over SSH
+  const needAzure = isAzureSshUrl(cfg.azureUrl);    // source url is SSH (else HTTPS → skip)
+
+  // 2. Trust host keys (best-effort; accept-new in gitEnv is the real safety net).
+  const trust = deps.trustHost || trustHost;
+  if (needGithub) trust('github.com', deps);
+  if (needAzure) trust(azureSshHost(cfg.azureUrl), deps);
+
+  // 3a. GitHub auth — always required for the push.
+  if (needGithub) {
+    const check = deps.githubCheck || cfg._sshCheck || checkGithubSsh;
+    const res = await check({ env: cfg.gitEnv });
+    if (!res.ok) throw new Error(`GitHub SSH preflight failed: ${res.reason}\n\n${sshKeyGuidance({ platform })}`);
+    ui.ok(`GitHub SSH OK — authenticated as ${res.user || 'your account'}.`);
+  }
+
+  // 3b. Azure auth — only when the source is SSH; HTTPS sources need no Azure key.
+  if (needAzure) {
+    const host = azureSshHost(cfg.azureUrl);
+    const check = deps.azureCheck || cfg._azureSshCheck || checkAzureSsh;
+    const res = await check({ env: cfg.gitEnv, host });
+    if (!res.ok) {
+      throw new Error(
+        `Azure DevOps SSH preflight failed: ${res.reason}\n\nFix it one of two ways:\n` +
+        '  - Add your SSH public key to Azure DevOps -> User settings -> SSH public keys, or\n' +
+        '  - Switch the Azure source URL to HTTPS, e.g.\n' +
+        '      https://ORG@dev.azure.com/ORG/PROJECT/_git/REPO',
+      );
+    }
+    ui.ok(`Azure DevOps SSH OK${res.user ? ` — ${res.user}` : ''}.`);
+  } else if (cfg.azureUrl) {
+    ui.info('Azure source is HTTPS — skipping Azure SSH checks (only GitHub SSH is needed).');
+  }
+
+  return { ok: true, key, needGithub, needAzure };
 }
 
 /** Full pipeline: idempotent, incremental, non-destructive. */
