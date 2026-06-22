@@ -22,7 +22,7 @@
 </p>
 
 ```bash
-npx vector-migrate          # run the interactive wizard — no install required
+npx vector-migrate@latest          # run the interactive wizard — no install required
 ```
 
 ---
@@ -68,7 +68,7 @@ sudo apt install -y git-filter-repo          # Linux (Debian/Ubuntu) — or: pip
 pip install git-filter-repo                  # Windows (needs Python; run in Git Bash or WSL)
 
 # 2. Run the wizard — it walks you through everything
-npx vector-migrate
+npx vector-migrate@latest
 ```
 
 That's it. The interactive wizard prompts for your Azure source, GitHub destination, and identity details, then does the rest. See [Prerequisites: git-filter-repo](#prerequisites-git-filter-repo) for per-OS detail.
@@ -82,7 +82,7 @@ Vector needs **Node.js ≥ 18** plus two git tools (`git` and `git-filter-repo` 
 **Run with no install:**
 
 ```bash
-npx vector-migrate
+npx vector-migrate@latest
 ```
 
 **Global install (recommended for repeat use):**
@@ -204,7 +204,7 @@ Vector's one system dependency is `git-filter-repo` (it also needs `git`, which 
 
 ```bash
 brew install git-filter-repo
-npx vector-migrate
+npx vector-migrate@latest
 ```
 
 ### Linux (Ubuntu / Debian)
@@ -215,7 +215,7 @@ sudo apt update && sudo apt install -y git git-filter-repo
 # ── or, on any distro, via pip ──
 pip3 install --user git-filter-repo
 
-npx vector-migrate
+npx vector-migrate@latest
 ```
 
 ### Windows
@@ -226,21 +226,21 @@ npx vector-migrate
 
 ```bash
 pip install git-filter-repo      # requires Python on PATH
-npx vector-migrate
+npx vector-migrate@latest
 ```
 
 **WSL** (Windows Subsystem for Linux) — treat it exactly like Linux (recommended for large repos):
 
 ```bash
 sudo apt install -y git git-filter-repo   # or: pip3 install --user git-filter-repo
-npx vector-migrate
+npx vector-migrate@latest
 ```
 
 **Native Windows / PowerShell** — make sure Python + `pip install git-filter-repo` are on your `PATH` so `git filter-repo` is callable, then run Node normally:
 
 ```powershell
 pip install git-filter-repo
-npx vector-migrate
+npx vector-migrate@latest
 ```
 
 ---
@@ -266,7 +266,7 @@ Run `vector-migrate --check` to verify everything at once — it reports whether
 
 ## Windows
 
-Vector runs natively on Windows. Two Windows-specific things are worth knowing.
+Vector runs natively on Windows. Always run it as **`npx vector-migrate@latest`** so you pick up the newest SSH and branch-conflict fixes — `npx` can otherwise reuse a cached older build. Two Windows-specific things are worth knowing.
 
 ### SSH key setup
 

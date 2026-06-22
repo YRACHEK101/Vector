@@ -4,6 +4,14 @@ All notable changes to `vector-migrate` are documented here. This project follow
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.1.1] - 2026-06-22
+
+### Changed
+
+- Docs: the README now recommends **`npx vector-migrate@latest`** everywhere
+  (especially for Windows users) so a cached older `npx` build can't mask the
+  v2.1 SSH/branch fixes. No code changes.
+
 ## [2.1.0] - 2026-06-22
 
 Robust, multi-key SSH detection with accurate, unambiguous failure guidance.
@@ -81,5 +89,6 @@ automatically, with cross-platform, OS-aware guidance.
 - Keyless or mis-configured-SSH runs fail fast with guidance instead of failing at
   the push after a full mirror clone.
 
+[2.1.1]: https://github.com/YRACHEK101/Vector/releases/tag/v2.1.1
 [2.1.0]: https://github.com/YRACHEK101/Vector/releases/tag/v2.1.0
 [2.0.0]: https://github.com/YRACHEK101/Vector/releases/tag/v2.0.0
