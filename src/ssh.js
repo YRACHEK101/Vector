@@ -49,14 +49,26 @@ export function parseSshAuth(output) {
   return { ok: false, reason: `Unrecognized ssh response: "${text.trim().split('\n')[0]}"` };
 }
 
+/** Identity args for an ssh probe: force one key when given, else offer them all. */
+function identityArgs(keyPath) {
+  // With an explicit key, force ONLY it (-i + IdentitiesOnly=yes). Without one,
+  // IdentitiesOnly=no lets ssh offer the agent AND every default identity file —
+  // so the probe succeeds if ANY of the user's keys is registered, matching how
+  // the real clone/push authenticates.
+  return keyPath
+    ? ['-i', keyPath, '-o', 'IdentitiesOnly=yes']
+    : ['-o', 'IdentitiesOnly=no'];
+}
+
 /**
  * Probe GitHub SSH auth. BatchMode so it never hangs on a prompt, a short timeout,
- * and accept-new so a first-time host key doesn't block. `runner` is injectable
+ * and accept-new so a first-time host key doesn't block. Tries every local key /
+ * the agent unless `keyPath` forces a specific one. `runner` is injectable
  * (returns the combined output string) so this is fully testable offline.
  * @returns {{ok:boolean, user?:string, reason?:string}}
  */
-export function checkGithubSsh({ runner, env } = {}) {
-  const args = ['-T', '-o', 'BatchMode=yes', '-o', 'StrictHostKeyChecking=accept-new', '-o', 'ConnectTimeout=8', 'git@github.com'];
+export function checkGithubSsh({ runner, env, keyPath } = {}) {
+  const args = ['-T', '-o', 'BatchMode=yes', ...identityArgs(keyPath), '-o', 'StrictHostKeyChecking=accept-new', '-o', 'ConnectTimeout=8', 'git@github.com'];
   const call = runner || ((a) => {
     const r = spawnSync('ssh', a, { encoding: 'utf8', timeout: 12000, env: { ...process.env, ...(env || {}) } });
     if (r.error && r.error.code === 'ENOENT') return 'ssh: command not found';
@@ -176,8 +188,8 @@ export function parseAzureSshAuth(output) {
 }
 
 /** Probe Azure DevOps SSH auth. BatchMode + accept-new + short timeout so it never hangs. */
-export function checkAzureSsh({ runner, env, host = 'ssh.dev.azure.com' } = {}) {
-  const args = ['-T', '-o', 'BatchMode=yes', '-o', 'StrictHostKeyChecking=accept-new', '-o', 'ConnectTimeout=8', `git@${host}`];
+export function checkAzureSsh({ runner, env, host = 'ssh.dev.azure.com', keyPath } = {}) {
+  const args = ['-T', '-o', 'BatchMode=yes', ...identityArgs(keyPath), '-o', 'StrictHostKeyChecking=accept-new', '-o', 'ConnectTimeout=8', `git@${host}`];
   const call = runner || ((a) => {
     const r = spawnSync('ssh', a, { encoding: 'utf8', timeout: 12000, env: { ...process.env, ...(env || {}) } });
     if (r.error && r.error.code === 'ENOENT') return 'ssh: command not found';

@@ -295,12 +295,22 @@ export async function ensureGithubSsh(cfg, ui = defaultUi) {
 export async function ensureSshReady(cfg, ui = defaultUi, deps = {}) {
   if (cfg.skipSshPreflight) return { ok: true, skipped: true };
   const platform = deps.platform || process.platform;
+  const fileExists = deps.fileExists || existsSync;
 
-  // 1. Local key must exist. This guard runs regardless of transport so a
-  //    keyless machine is caught immediately, before the long clone.
-  const key = (deps.findSshKey || findSshKey)({ explicitKey: cfg.sshKey });
-  if (!key.found) throw new Error(sshKeyGuidance({ platform }));
-  ui.ok(`SSH key detected (${key.source === 'agent' ? 'ssh-agent' : key.path || key.source}).`);
+  // An explicit --ssh-key, when given, must exist; we then force ONLY it (so the
+  // probe matches the push, which already pins it via gitEnv's -i/IdentitiesOnly).
+  const explicitKey = cfg.sshKey || '';
+  if (explicitKey && !fileExists(explicitKey)) {
+    throw new Error(`--ssh-key path not found: ${explicitKey}`);
+  }
+
+  // 1. Is there ANY usable key — explicit, on disk, or in the agent? If none, the
+  //    only fix is to generate one: show OS-specific guidance and stop before the
+  //    clone. We do NOT pin to a single identity; ssh will try them all below.
+  const any = (deps.findSshKey || findSshKey)({ explicitKey });
+  if (!any.found) throw new Error(sshKeyGuidance({ platform }));
+  if (explicitKey) ui.ok(`Using the SSH key passed with --ssh-key: ${explicitKey}`);
+  else ui.ok('SSH key(s) found — verifying against all local keys and the ssh-agent.');
 
   const needGithub = isGithubSshUrl(cfg.githubSsh); // destination push is over SSH
   const needAzure = isAzureSshUrl(cfg.azureUrl);    // source url is SSH (else HTTPS → skip)
@@ -310,10 +320,12 @@ export async function ensureSshReady(cfg, ui = defaultUi, deps = {}) {
   if (needGithub) trust('github.com', deps);
   if (needAzure) trust(azureSshHost(cfg.azureUrl), deps);
 
-  // 3a. GitHub auth — always required for the push.
+  const keyPath = explicitKey || undefined; // undefined → ssh offers agent + all keys
+
+  // 3a. GitHub auth — always required for the push. Fails only if NO key authenticates.
   if (needGithub) {
     const check = deps.githubCheck || cfg._sshCheck || checkGithubSsh;
-    const res = await check({ env: cfg.gitEnv });
+    const res = await check({ env: cfg.gitEnv, keyPath });
     if (!res.ok) throw new Error(`GitHub SSH preflight failed: ${res.reason}\n\n${sshKeyGuidance({ platform })}`);
     ui.ok(`GitHub SSH OK — authenticated as ${res.user || 'your account'}.`);
   }
@@ -322,7 +334,7 @@ export async function ensureSshReady(cfg, ui = defaultUi, deps = {}) {
   if (needAzure) {
     const host = azureSshHost(cfg.azureUrl);
     const check = deps.azureCheck || cfg._azureSshCheck || checkAzureSsh;
-    const res = await check({ env: cfg.gitEnv, host });
+    const res = await check({ env: cfg.gitEnv, host, keyPath });
     if (!res.ok) {
       throw new Error(
         `Azure DevOps SSH preflight failed: ${res.reason}\n\nFix it one of two ways:\n` +
@@ -336,7 +348,7 @@ export async function ensureSshReady(cfg, ui = defaultUi, deps = {}) {
     ui.info('Azure source is HTTPS — skipping Azure SSH checks (only GitHub SSH is needed).');
   }
 
-  return { ok: true, key, needGithub, needAzure };
+  return { ok: true, needGithub, needAzure };
 }
 
 /** Full pipeline: idempotent, incremental, non-destructive. */
