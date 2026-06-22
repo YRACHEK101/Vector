@@ -104,6 +104,36 @@ vector-migrate --help          # full flag reference
 
 ---
 
+## From scratch (step by step)
+
+Never set this up before? These guides take you from zero to a working migration on your operating system.
+
+### Windows — from scratch (step by step)
+
+New to this on Windows? Here is everything from zero. Run the commands in **Command Prompt**.
+
+**1. Install Node.js.** Download the LTS build from nodejs.org and install it. Verify: `node -v` and `npm -v`.
+
+**2. Install Git.** Download Git for Windows from git-scm.com and install with the defaults. Verify: `git --version`.
+
+**3. Install git-filter-repo.** Vector needs it. Run `pip install git-filter-repo`. If `pip` isn't found, install Python from python.org (check "Add Python to PATH"), then retry. Verify: `git filter-repo --version`.
+
+**4. Create an SSH key.** Run `ssh-keygen -t ed25519 -C "your-email@example.com"` and press Enter at every prompt for the defaults.
+
+**5. Register the key with GitHub.** Print it with `type %USERPROFILE%\.ssh\id_ed25519.pub`, copy the whole line (it starts with `ssh-ed25519`), then go to https://github.com/settings/keys → New SSH key → paste → Add SSH key.
+
+**6. Register the same key with Azure DevOps.** In Azure DevOps: avatar (top right) → User settings → SSH public keys → New Key → paste the same key → Save.
+
+**7. Verify SSH works.** Run `ssh -T git@github.com`. You should see `Hi <username>! You've successfully authenticated...`. If asked "continue connecting?", type `yes`.
+
+**8. Run Vector.** `npx vector-migrate@latest`. Answer the prompts: Azure URL (HTTPS is easiest: `https://ORG@dev.azure.com/ORG/PROJECT/_git/REPO`), GitHub destination (`git@github.com:USERNAME/REPO.git`), and a short project slug.
+
+**Notes**
+- The key must be registered on **both** GitHub (for the push) and Azure (for the fetch); missing either side will fail.
+- Steps 1–7 are one-time setup. After that, each migration is just step 8.
+- Azure over HTTPS is usually easier than SSH — if Azure SSH gives you trouble, use the HTTPS URL.
+- If anything goes wrong, run `npx vector-migrate@latest --doctor` to see exactly what's missing.
+
 ## Solo and team migration
 
 Vector has **one auto-detecting flow** — there is no mode to choose. After it mirrors the Azure repo, it scans every author across all branches and shows you who's there:
