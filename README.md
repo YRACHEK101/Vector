@@ -285,7 +285,9 @@ A modern alternative is `ssh-keygen -t ed25519 -C "your-email"`.
 Then add that **public** key to both services:
 
 - **Azure DevOps** — User settings → **SSH public keys** → New Key
-- **GitHub** — Settings → **SSH and GPG keys** → New SSH key
+- **GitHub** — Settings → **SSH and GPG keys** → New SSH key (direct link: `https://github.com/settings/keys`)
+
+**Any of your keys can work.** Vector doesn't pin to one identity — the preflight offers your `ssh-agent` and **every** key in `~/.ssh` (`id_ed25519`, `id_rsa`, `id_ecdsa`, `id_dsa`) and passes as long as **one** of them is registered. If none is registered, it stops **before** the long mirror clone and the message **lists every local key** with the exact command to print it and a direct link to register one — so you register the right file and re-run. To force a specific key, pass `--ssh-key <path>`.
 
 Vector trusts the `github.com` (and, for an SSH Azure source, `ssh.dev.azure.com`) host keys automatically, and verifies authentication up front. If your Azure source URL is **HTTPS**, no Azure SSH key is needed — Vector skips the Azure SSH checks entirely.
 
