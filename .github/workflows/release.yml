@@ -22,7 +22,7 @@ jobs:
       - name: Set up Node
         uses: actions/setup-node@v4
         with:
-          node-version: 20
+          node-version: 22
           registry-url: 'https://registry.npmjs.org'
 
       - name: Install git-filter-repo (required by the test suite)
@@ -39,6 +39,18 @@ jobs:
 
       - name: Test
         run: npm test
+
+      # Fail fast with a clear message if the publish credential is missing, so a
+      # mis-configured secret doesn't surface as a confusing npm publish error.
+      - name: Verify the NPM_TOKEN secret is set
+        env:
+          NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          if [ -z "$NPM_TOKEN" ]; then
+            echo "::error::NPM_TOKEN repo secret is not set. Add an npm Automation token at Settings -> Secrets and variables -> Actions (name: NPM_TOKEN). Automatic npm publishing cannot run without it."
+            exit 1
+          fi
+          echo "NPM_TOKEN secret is present."
 
       # `npm publish --provenance` attaches a signed build attestation linking the
       # published tarball to this repo + workflow run. Requires id-token: write and
