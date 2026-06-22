@@ -264,6 +264,48 @@ Run `vector-migrate --check` to verify everything at once — it reports whether
 
 ---
 
+## Windows
+
+Vector runs natively on Windows. Two Windows-specific things are worth knowing.
+
+### SSH key setup
+
+Vector authenticates over SSH (never a token), so you need an SSH key registered with **both** Azure DevOps (the source) and GitHub (the destination). If no key is found, Vector stops **before** the long mirror clone and prints these exact steps — so you fix it in seconds instead of waiting and then failing.
+
+```bat
+:: 1. Generate a key (press Enter at every prompt for the defaults)
+ssh-keygen -t rsa -b 4096 -C "your-email@gmail.com"
+
+:: 2. Print the public key and copy it
+type %USERPROFILE%\.ssh\id_rsa.pub
+```
+
+A modern alternative is `ssh-keygen -t ed25519 -C "your-email"`.
+
+Then add that **public** key to both services:
+
+- **Azure DevOps** — User settings → **SSH public keys** → New Key
+- **GitHub** — Settings → **SSH and GPG keys** → New SSH key
+
+Vector trusts the `github.com` (and, for an SSH Azure source, `ssh.dev.azure.com`) host keys automatically, and verifies authentication up front. If your Azure source URL is **HTTPS**, no Azure SSH key is needed — Vector skips the Azure SSH checks entirely.
+
+> Running in **Git Bash** or **WSL** instead of `cmd`? Use `cat ~/.ssh/id_rsa.pub` to print the key. WSL behaves exactly like Linux.
+
+### Case-insensitive branch conflicts (handled automatically)
+
+Windows (and default macOS) filesystems are case-insensitive, which makes git-filter-repo crash with `cannot lock ref 'refs/heads/X': 'refs/heads/x' exists` when a repo contains branches that collide once case is ignored — for example:
+
+- two branches differing only in case: `Mbouzine` vs `MBouzine`
+- a branch that is also a path-prefix of another: `MBouzine` and `MBouzine/init_repo`
+
+**Vector now detects these before the rewrite and resolves them for you** — no crash, no manual cleanup. On Windows it first tries to enable case-sensitive ref storage for its scratch copy (via `fsutil`); for anything that remains it offers a choice, defaulting to the safe, data-preserving option:
+
+1. **Rename** the conflicting branch(es) with a `-N` suffix so **every** branch still migrates (default).
+2. **Skip** the conflicting branch(es) with a warning.
+3. **Abort** with guidance (re-run on Linux/WSL, or narrow the set with `--branch`).
+
+---
+
 ## Incremental Syncs (re-running safely)
 
 Migration is rarely one-and-done. Re-run Vector any time new commits land on Azure — it's incremental and strictly **non-destructive**:

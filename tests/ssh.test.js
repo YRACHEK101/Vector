@@ -5,8 +5,9 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
   parseSshAuth, checkGithubSsh, formatSshStatus, SSH_SETUP_HELP,
+  findSshKey, sshKeyGuidance, isAzureSshUrl, azureSshHost, parseAzureSshAuth, checkAzureSsh,
 } from '../src/ssh.js';
-import { isGithubSshUrl, ensureGithubSsh, migrate } from '../src/pipeline.js';
+import { isGithubSshUrl, ensureGithubSsh, ensureSshReady, migrate } from '../src/pipeline.js';
 import { finalizeConfig } from '../src/config.js';
 
 // The real GitHub success banner — note it arrives on a process that EXITS 1.
@@ -138,4 +139,111 @@ test('migrate: a passing SSH check proceeds PAST the gate (then fails later, not
   } finally {
     rmSync(WS, { recursive: true, force: true });
   }
+});
+
+// ── v2 — SSH key detection (present vs absent) ───────────────────────────────
+test('findSshKey: detects an explicit key, a ~/.ssh key, ssh-agent, or none', () => {
+  // explicit path wins when it exists
+  assert.deepEqual(
+    findSshKey({ explicitKey: '/keys/deploy', fileExists: (p) => p === '/keys/deploy', agentHasKey: () => false }),
+    { found: true, source: 'explicit', path: '/keys/deploy' },
+  );
+  // a standard ~/.ssh key (private OR .pub present)
+  const viaFile = findSshKey({ home: '/home/me', fileExists: (p) => p === '/home/me/.ssh/id_ed25519.pub', agentHasKey: () => false });
+  assert.equal(viaFile.found, true);
+  assert.equal(viaFile.source, 'file');
+  // nothing on disk but the agent holds a key
+  assert.deepEqual(findSshKey({ home: '/empty', fileExists: () => false, agentHasKey: () => true }), { found: true, source: 'agent' });
+  // truly absent
+  assert.deepEqual(findSshKey({ home: '/empty', fileExists: () => false, agentHasKey: () => false }), { found: false });
+});
+
+test('sshKeyGuidance: includes the rsa 4096 command and OS-correct "show key" command', () => {
+  const win = sshKeyGuidance({ platform: 'win32' });
+  assert.match(win, /ssh-keygen -t rsa -b 4096 -C/);   // the exact command requested
+  assert.match(win, /ssh-keygen -t ed25519/);          // modern alternative mentioned
+  assert.match(win, /type %USERPROFILE%\\\.ssh\\id_rsa\.pub/); // cmd-friendly
+  assert.match(win, /Azure DevOps/);
+  assert.match(win, /GitHub/);
+
+  const nix = sshKeyGuidance({ platform: 'darwin' });
+  assert.match(nix, /cat ~\/\.ssh\/id_rsa\.pub/);       // bash/macOS friendly
+  assert.match(nix, /ssh-keygen -t rsa -b 4096 -C/);
+});
+
+// ── v2 — Azure SSH gating + parsing ──────────────────────────────────────────
+test('isAzureSshUrl / azureSshHost: true only for Azure SSH urls; host extracted', () => {
+  assert.equal(isAzureSshUrl('git@ssh.dev.azure.com:v3/org/proj/repo'), true);
+  assert.equal(isAzureSshUrl('ssh://git@ssh.dev.azure.com/v3/org/proj/repo'), true);
+  assert.equal(isAzureSshUrl('https://org@dev.azure.com/org/proj/_git/repo'), false);
+  assert.equal(isAzureSshUrl(''), false);
+  assert.equal(azureSshHost('git@ssh.dev.azure.com:v3/org/proj/repo'), 'ssh.dev.azure.com');
+});
+
+test('parseAzureSshAuth: permission-denied fails; a non-failing banner authenticates', () => {
+  assert.equal(parseAzureSshAuth('git@ssh.dev.azure.com: Permission denied (publickey).').ok, false);
+  assert.equal(parseAzureSshAuth('remote: Shell access is not supported.').ok, true);
+  assert.equal(parseAzureSshAuth('').ok, false);
+  assert.match(parseAzureSshAuth('Host key verification failed.').reason, /host key/i);
+});
+
+test('checkAzureSsh: targets the given host with BatchMode (no hang), via injected runner', () => {
+  let argsSeen;
+  const r = checkAzureSsh({ host: 'ssh.dev.azure.com', runner: (a) => { argsSeen = a; return 'remote: Shell access is not supported.'; } });
+  assert.equal(r.ok, true);
+  assert.ok(argsSeen.includes('git@ssh.dev.azure.com'));
+  assert.ok(argsSeen.join(' ').includes('BatchMode=yes'));
+});
+
+// ── v2 — ensureSshReady orchestration (all IO injected, no network) ──────────
+test('ensureSshReady: missing key throws the ssh-keygen guidance, before any clone', async () => {
+  await assert.rejects(
+    () => ensureSshReady(
+      { githubSsh: 'git@github.com:o/r.git', azureUrl: 'https://org@dev.azure.com/o/p/_git/r' },
+      undefined,
+      { findSshKey: () => ({ found: false }), trustHost: () => ({}) },
+    ),
+    (e) => { assert.match(e.message, /ssh-keygen -t rsa -b 4096/); return true; },
+  );
+});
+
+test('ensureSshReady: HTTPS Azure source skips Azure SSH, verifies GitHub only', async () => {
+  let azureChecked = false;
+  const res = await ensureSshReady(
+    { githubSsh: 'git@github.com:o/r.git', azureUrl: 'https://org@dev.azure.com/o/p/_git/r' },
+    undefined,
+    {
+      findSshKey: () => ({ found: true, source: 'file', path: '/k' }),
+      trustHost: () => ({}),
+      githubCheck: () => ({ ok: true, user: 'octocat' }),
+      azureCheck: () => { azureChecked = true; return { ok: true }; },
+    },
+  );
+  assert.equal(res.ok, true);
+  assert.equal(res.needAzure, false);
+  assert.equal(azureChecked, false, 'an HTTPS Azure source is never SSH-probed');
+});
+
+test('ensureSshReady: SSH Azure source is verified; failure explains the HTTPS fallback', async () => {
+  await assert.rejects(
+    () => ensureSshReady(
+      { githubSsh: 'git@github.com:o/r.git', azureUrl: 'git@ssh.dev.azure.com:v3/org/proj/repo' },
+      undefined,
+      {
+        findSshKey: () => ({ found: true, source: 'agent' }),
+        trustHost: () => ({}),
+        githubCheck: () => ({ ok: true, user: 'octocat' }),
+        azureCheck: () => ({ ok: false, reason: 'Permission denied (publickey).' }),
+      },
+    ),
+    (e) => {
+      assert.match(e.message, /Azure DevOps SSH preflight failed/);
+      assert.match(e.message, /Switch the Azure source URL to HTTPS/);
+      return true;
+    },
+  );
+});
+
+test('ensureSshReady: skips entirely when disabled', async () => {
+  assert.deepEqual(await ensureSshReady({ skipSshPreflight: true }), { ok: true, skipped: true });
 });
