@@ -101,9 +101,13 @@ export async function resolveBranchConflicts(cfg, ui = defaultUi) {
   const conflicts = detectBranchConflicts(branches);
   if (!conflicts.length) return { conflicts: [], renames: [], skipped: [], strategy: 'none' };
 
-  ui.warn(`Detected ${conflicts.length} branch-name conflict(s) that break on case-insensitive (Windows) filesystems:`);
+  const conflictLabel = (type) =>
+    (type === 'case' ? 'case-only'
+      : type === 'case-dir' ? 'directory case'
+        : 'directory/file');
+  ui.warn(`Detected ${conflicts.length} branch-name conflict(s) that break on case-insensitive (Windows/macOS) filesystems:`);
   for (const cf of conflicts) {
-    ui.warn(`  • ${cf.type === 'case' ? 'case-only' : 'directory/file'} conflict: "${cf.a}" vs "${cf.b}"`);
+    ui.warn(`  • ${conflictLabel(cf.type)} conflict: "${cf.a}" vs "${cf.b}"`);
   }
 
   // Choose a strategy: interactive resolver if one was injected, else default rename.
@@ -127,8 +131,15 @@ export async function resolveBranchConflicts(cfg, ui = defaultUi) {
     for (const { from, to } of plan.renames) {
       const sha = query('git', [...gitDir(dir), 'rev-parse', `refs/heads/${from}`]);
       if (!sha) continue;
-      await run('git', [...gitDir(dir), 'update-ref', `refs/heads/${to}`, sha], { env: cfg.gitEnv });
-      await run('git', [...gitDir(dir), 'update-ref', '-d', `refs/heads/${from}`, sha], { env: cfg.gitEnv });
+      const create = () => run('git', [...gitDir(dir), 'update-ref', `refs/heads/${to}`, sha], { env: cfg.gitEnv });
+      const remove = () => run('git', [...gitDir(dir), 'update-ref', '-d', `refs/heads/${from}`, sha], { env: cfg.gitEnv });
+      // A pure case re-spelling (e.g. "yrachek/E2E-test" → "yRachek/E2E-test")
+      // aliases the old and new names on a case-insensitive FS, so creating first
+      // would let the delete remove the freshly-written ref. Remove the old ref
+      // FIRST in that case; for a genuinely distinct "-N" name, create first so the
+      // branch is never momentarily absent.
+      if (lc(from) === lc(to)) { await remove(); await create(); }
+      else { await create(); await remove(); }
       ui.ok(`  [${from}] → [${to}] (renamed to avoid the conflict; branch still migrates).`);
     }
   }

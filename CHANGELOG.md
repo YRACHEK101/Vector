@@ -4,6 +4,27 @@ All notable changes to `vector-migrate` are documented here. This project follow
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.3.2] - 2026-06-23
+
+### Fixed
+
+- **Branches whose directory differs only by case no longer strand un-rewritten
+  commits.** When a repo had sibling branches under directories that differ only
+  in case — e.g. `yRachek/Front-end` and `yRachek/connect_erp` alongside
+  `yrachek/E2E-test` — the rewrite silently broke on case-insensitive filesystems
+  (macOS, Windows): git folds `yRachek/` and `yrachek/` into one directory, so the
+  clone/rewrite re-cased one branch while the original stayed in `packed-refs`,
+  leaving its **original (un-rewritten) commits reachable**. The migration then
+  aborted at the post-rewrite safety check ("old email … still present"). Vector
+  now detects this **directory-case conflict** (previously only whole-name
+  case-only and directory/file collisions were caught) and resolves it by
+  re-casing the stray segment to a single canonical spelling — preserving every
+  branch and every commit. A `-N` suffix is deliberately *not* used here: it can
+  never remove a colliding directory prefix.
+- The case-respelling rename is applied **old-ref-first** (delete then re-create),
+  because the two spellings alias each other on a case-insensitive filesystem and
+  a create-first order would let the delete remove the freshly-written ref.
+
 ## [2.3.1] - 2026-06-23
 
 ### Fixed
