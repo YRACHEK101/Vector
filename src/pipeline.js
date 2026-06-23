@@ -286,23 +286,60 @@ export async function pushBranch(cfg, branch, ui = defaultUi) {
   const doPush = (force = false) =>
     run('git', [...gd, 'push', ...(force ? ['--force'] : []), cfg.githubSsh, `refs/heads/${branch}:refs/heads/${branch}`], { env: cfg.gitEnv });
 
+  let forced = false;
   switch (strategy) {
     case 'create':
-      await doPush(); ui.ok(`[${branch}] created on GitHub (new branch).`); break;
+      await doPush(); ui.ok(`[${branch}] created on the destination (new branch).`); break;
     case 'noop':
-      ui.ok(`[${branch}] already up to date — nothing to push.`); break;
+      ui.ok(`[${branch}] already present and identical — skipped (no re-push).`); break;
     case 'fast-forward': {
       const ahead = query('git', [...gd, 'rev-list', '--count', `${remoteSha}..${localSha}`]) || '?';
       await doPush(); ui.ok(`[${branch}] fast-forwarded (+${ahead} commit(s)) — existing history preserved.`); break;
     }
     case 'remote-ahead':
-      ui.warn(`[${branch}] remote is AHEAD — skipping to protect GitHub history.`); break;
+      ui.warn(`[${branch}] remote is AHEAD — skipping to protect destination history.`); break;
     case 'diverged':
-      if (cfg.force) { await doPush(true); ui.warn(`[${branch}] force-pushed (divergence resolved).`); }
-      else ui.warn(`[${branch}] histories DIVERGED — skipped. Re-run with --force to overwrite.`);
+      // An identity rewrite produces NEW SHAs, so an already-pushed branch diverges.
+      // Never overwrite by default; force only on an explicit opt-in.
+      if (cfg.force || cfg.forceExisting) {
+        await doPush(true); forced = true;
+        ui.warn(`[${branch}] force-updated on the destination — the new identities changed its commit SHAs.`);
+      } else {
+        ui.warn(`[${branch}] already on the destination but DIFFERS — skipped. Use --force-existing to apply the new identities (commit SHAs will change).`);
+      }
       break;
   }
-  return { branch, strategy, localSha, remoteSha };
+  return { branch, strategy, forced, localSha, remoteSha };
+}
+
+/**
+ * Pure: tally per-branch push outcomes for the run summary.
+ * @returns {{created,fastForwarded,upToDate,differs,forceUpdated,remoteAhead,missing:string[]}}
+ */
+export function summarizePushes(pushes = []) {
+  const b = { created: [], fastForwarded: [], upToDate: [], differs: [], forceUpdated: [], remoteAhead: [], missing: [] };
+  for (const p of pushes) {
+    if (p.strategy === 'create') b.created.push(p.branch);
+    else if (p.strategy === 'fast-forward') b.fastForwarded.push(p.branch);
+    else if (p.strategy === 'noop') b.upToDate.push(p.branch);
+    else if (p.strategy === 'remote-ahead') b.remoteAhead.push(p.branch);
+    else if (p.strategy === 'diverged') (p.forced ? b.forceUpdated : b.differs).push(p.branch);
+    else if (p.strategy === 'missing-local') b.missing.push(p.branch);
+  }
+  return b;
+}
+
+/** Pure: one-line human summary of a migration's pushes. */
+export function formatPushSummary(pushes = []) {
+  const b = summarizePushes(pushes);
+  const named = (arr) => (arr.length ? ` (${arr.join(', ')})` : '');
+  const parts = [`Pushed: ${b.created.length} new`];
+  if (b.fastForwarded.length) parts.push(`Fast-forwarded: ${b.fastForwarded.length}${named(b.fastForwarded)}`);
+  parts.push(`Skipped (already present): ${b.upToDate.length}${named(b.upToDate)}`);
+  parts.push(`Differs (use --force-existing): ${b.differs.length}${named(b.differs)}`);
+  if (b.forceUpdated.length) parts.push(`Force-updated: ${b.forceUpdated.length}${named(b.forceUpdated)}`);
+  if (b.remoteAhead.length) parts.push(`Remote ahead (skipped): ${b.remoteAhead.length}${named(b.remoteAhead)}`);
+  return parts.join(' · ');
 }
 
 /** Step 5 — confirm each branch's remote tip matches local where we pushed. */

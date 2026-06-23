@@ -11,7 +11,7 @@ import {
 } from './config.js';
 import { checkPrerequisites } from './prereqs.js';
 import { doctor } from './doctor.js';
-import { migrate, ensureSshReady, syncSourceMirror, listAuthors, listBranches } from './pipeline.js';
+import { migrate, ensureSshReady, syncSourceMirror, listAuthors, listBranches, formatPushSummary } from './pipeline.js';
 import { parseMailmap, entriesToMailmap, summarizeMapping } from './team.js';
 import {
   checkGithubSsh, checkAzureSsh, formatSshStatus,
@@ -289,5 +289,7 @@ export async function run(argv) {
   // ── Steps 3,6: mirror (idempotent) → rewrite → ancestry-aware push, all branches ──
   const result = await migrate(final, ui);
   printVerification(result);
+  ui.step('Push summary');
+  ui.info(`  ${formatPushSummary(result.pushes)}`);
   ui.ok('\n✅ Migration complete. Every mapped author keeps attribution at original commit dates.');
 }
