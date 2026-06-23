@@ -7,7 +7,7 @@
 // ─────────────────────────────────────────────────────────────────────────────
 import { deriveProjectSlug } from './config.js';
 import { query } from './git.js';
-import { resolveYou, defaultNewIdentity, buildIdentityEntries } from './team.js';
+import { resolveYou, defaultNewIdentity, buildIdentityEntries, myUnifyEmails } from './team.js';
 
 const required = (v) => (String(v ?? '').trim() ? true : 'This value is required.');
 const requiredEmail = (v) => (/^[^\s@<>]+@[^\s@<>]+$/.test(String(v ?? '').trim()) ? true : 'Enter a valid email address.');
@@ -68,29 +68,44 @@ export async function runMappingWizard(identities = []) {
     you = identities.find((id) => id.email === youEmail);
   }
 
-  // Everyone else is kept by default; offer to remap teammates.
-  const others = identities.filter((id) => id.email.toLowerCase() !== you.email.toLowerCase());
+  // Every name under MY email(s) — source AND new — unifies to my new identity.
+  const myEmails = new Set(myUnifyEmails({ you, newIdentity, identities }).map((e) => e.toLowerCase()));
+  const myNames = identities.filter((id) => myEmails.has(id.email.toLowerCase()));
+  const others = identities.filter((id) => !myEmails.has(id.email.toLowerCase()));
+  if (myNames.length > 1) {
+    process.stderr.write(`  Unifying ${myNames.length} of your names → ${newIdentity.name} <${newIdentity.email}>: ${myNames.map((i) => `"${i.name}"`).join(', ')}\n`);
+  }
+
+  // Everyone else is kept by default; offer to remap teammates, grouped by email.
   const teammates = [];
   if (others.length) {
+    const byEmail = new Map();
+    for (const id of others) {
+      const k = id.email.toLowerCase();
+      if (!byEmail.has(k)) byEmail.set(k, { email: id.email, names: [] });
+      byEmail.get(k).names.push(id.name);
+    }
+    const groups = [...byEmail.values()];
     const { editTeam } = await inquirer.prompt([{
       type: 'confirm', name: 'editTeam', default: false,
-      message: `Also remap any of the ${others.length} other author(s)? (default: keep them unchanged)`,
+      message: `Also remap any of the ${groups.length} other author email(s)? (default: keep them unchanged)`,
     }]);
     if (editTeam) {
-      for (const id of others) {
+      for (const g of groups) {
+        const namesLabel = g.names.map((n) => `"${n}"`).join(', ');
         const { mapping } = await inquirer.prompt([{
           type: 'input', name: 'mapping', validate: targetOrBlank,
-          message: `Map ${id.name} <${id.email}> → (blank = keep) "New Name <new@email>":`,
+          message: `Map ${namesLabel} <${g.email}> → (blank = keep) "New Name <new@email>":`,
         }]);
         const s = String(mapping ?? '').trim();
         if (!s) continue;
         const m = s.match(/^(.+?)\s*<([^>]+)>\s*$/);
-        teammates.push({ sourceEmail: id.email, target: { name: m[1].trim(), email: m[2].trim() } });
+        teammates.push({ sourceEmail: g.email, target: { name: m[1].trim(), email: m[2].trim() } });
       }
     }
   }
 
-  return buildIdentityEntries({ you, newIdentity, teammates });
+  return buildIdentityEntries({ you, newIdentity, identities, teammates });
 }
 
 /** The confirm gate before any rewrite. */
