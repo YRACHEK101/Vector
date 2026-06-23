@@ -188,18 +188,19 @@ export function validateMappings(ids, entries) {
   for (const e of entries || []) {
     if (lc(e.sourceEmail) !== lc(e.email)) {
       if (ids.some((id) => lc(id.email) === lc(e.sourceEmail))) {
-        errors.push(`old email <${e.sourceEmail}> still present after rewrite`);
+        errors.push(`old email <${e.sourceEmail}> still present after rewrite (its commits were not remapped to "${e.name}" <${e.email}>)`);
       }
     } else if (e.sourceName) {
       if (ids.some((id) => lc(id.email) === lc(e.email) && lc(id.name) === lc(e.sourceName))) {
-        errors.push(`old name "${e.sourceName}" for <${e.email}> still present after rewrite`);
+        errors.push(`"${e.sourceName}" <${e.email}> still present after rewrite (not unified to "${e.name}")`);
       }
     } else {
       const stray = [...new Set(ids
         .filter((id) => lc(id.email) === lc(e.email) && lc(id.name) !== lc(e.name))
         .map((id) => id.name))];
       if (stray.length) {
-        errors.push(`name(s) ${stray.map((n) => `"${n}"`).join(', ')} for <${e.email}> were not unified to "${e.name}"`);
+        const pairs = stray.map((n) => `"${n}" <${e.email}>`).join(', ');
+        errors.push(`not unified to "${e.name}" <${e.email}>: ${pairs}`);
       }
     }
   }
