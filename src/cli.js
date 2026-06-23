@@ -53,6 +53,8 @@ ${c.bold('BRANCHES & SAFETY')}
   --branch <name>            PUSH_BRANCHES      Limit to specific branch (repeatable)
   --all-branches             ALL_BRANCHES       Every branch (this is the default)
   --force                                       Allow force-push only on TRUE divergence
+  --force-existing                              Apply new identities to branches ALREADY on the destination
+                                                (force-update — commit SHAs change for those branches)
 
 ${c.bold('GENERAL')}
   --project <slug>           PROJECT            Local folder slug (auto-derived)
@@ -72,7 +74,7 @@ const VALUE_FLAGS = {
 
 export function parseArgs(argv) {
   const opts = {
-    help: false, version: false, check: false, doctor: false, force: false,
+    help: false, version: false, check: false, doctor: false, force: false, forceExisting: false,
     assumeYes: false, nonInteractive: false, allBranches: false,
     interactive: !!process.stdin.isTTY,
     overrides: {}, branchList: [], mapList: [],
@@ -84,6 +86,7 @@ export function parseArgs(argv) {
     else if (a === '--check' || a === '--dry-run') opts.check = true;
     else if (a === '--doctor') opts.doctor = true;
     else if (a === '--force') opts.force = true;
+    else if (a === '--force-existing') opts.forceExisting = true;
     else if (a === '-y' || a === '--yes') opts.assumeYes = true;
     else if (a === '--non-interactive') { opts.nonInteractive = true; opts.interactive = false; }
     else if (a === '--all-branches') opts.allBranches = true;
@@ -106,6 +109,7 @@ function assembleConfig(opts) {
   delete ov.branchesInput;
   if (branches.length) ov.branches = branches;
   if (opts.force) ov.force = true;
+  if (opts.forceExisting) ov.forceExisting = true;
   if (opts.allBranches) ov.allBranches = true;
   if (opts.mapList.length) ov.maps = opts.mapList;
   return mergeConfigs(env, ov);

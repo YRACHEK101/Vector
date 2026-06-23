@@ -167,6 +167,7 @@ export function finalizeConfig(cfg, { cwd = process.cwd() } = {}) {
     allOldEmails,
     sshKey,
     force: !!cfg.force,
+    forceExisting: !!cfg.forceExisting,
     allBranches: !!cfg.allBranches,
     mailmapText: resolved.text,
     rewriteEmails: resolved.rewriteEmails,
