@@ -4,6 +4,24 @@ All notable changes to `vector-migrate` are documented here. This project follow
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.3.1] - 2026-06-23
+
+### Fixed
+
+- **Auto-unify all of your names under one email.** When you provide your new
+  NAME + EMAIL, the interactive flow now unifies **every** author name found under
+  your email(s) — your source email *and* your new email (for the common case
+  where you already committed under that email with a different display name) — to
+  your chosen identity. Previously a second name sharing your email (or a stray
+  name on your new email) could be left un-unified, then correctly flagged by the
+  safety check with no easy way to fix it.
+- The interactive remap step **groups other authors by email** (showing every name
+  per email so none is missed) and **includes the detected "you" identity** in the
+  unification when its name differs from your chosen name; other people are kept
+  unless you explicitly remap them.
+- The safety check now names the exact `Name <email>` pair(s) that remain, so any
+  failure is directly actionable.
+
 ## [2.3.0] - 2026-06-23
 
 ### Added
@@ -143,6 +161,7 @@ automatically, with cross-platform, OS-aware guidance.
 - Keyless or mis-configured-SSH runs fail fast with guidance instead of failing at
   the push after a full mirror clone.
 
+[2.3.1]: https://github.com/YRACHEK101/Vector/releases/tag/v2.3.1
 [2.3.0]: https://github.com/YRACHEK101/Vector/releases/tag/v2.3.0
 [2.2.1]: https://github.com/YRACHEK101/Vector/releases/tag/v2.2.1
 [2.2.0]: https://github.com/YRACHEK101/Vector/releases/tag/v2.2.0

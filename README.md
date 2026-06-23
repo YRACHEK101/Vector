@@ -232,6 +232,8 @@ Canonical Name <canonical@company.com> <old2@corp.com>
 
 Vector validates **per mapping** exactly what each change intended: a name-only remap only requires the **old name to be gone for that email** (the email is kept on purpose); an email change requires the **old email to be gone**. It never errors just because the new/canonical identity already legitimately exists in history. This is what makes a commit-counting webhook attribute a person correctly even when they committed under several usernames.
 
+**In the interactive flow you don't hunt names down one by one.** When you enter your new NAME and EMAIL, Vector automatically unifies **every** author name it finds under your email — both your source email and your new email (in case you already committed under that email with a different display name) — to your chosen identity. The detected "you" identity is included even if its name differs. Other authors are grouped by email and **kept unchanged** unless you explicitly remap them. So providing one NAME + EMAIL is all it takes to collapse `Y. Rachek <…>`, `Yahia RACHEK <…>`, `yRachek <…>` into one contributor.
+
 ---
 
 ## Non-Interactive / Scripted Runs
