@@ -9,7 +9,7 @@ import { existsSync, writeFileSync, rmSync, mkdirSync } from 'node:fs';
 import { run, query, status, gitDir } from './git.js';
 import { buildMailmap } from './config.js';
 import {
-  parseBranchRefs, resolveBranches, parseIdentities,
+  parseBranchRefs, resolveBranches, parseIdentities, parseMailmap,
   detectBranchConflicts, planConflictResolution,
 } from './team.js';
 import {
@@ -151,6 +151,61 @@ export function emailsPresent(cfg, emails) {
 /** Back-compat helper: are any of the personal-mode old emails present? */
 export const oldEmailsPresent = (cfg) => emailsPresent(cfg, cfg.allOldEmails);
 
+const lc = (s) => String(s ?? '').toLowerCase();
+
+/** Unique author + committer (name,email) identities across all refs of the staging mirror. */
+function historyIdentities(cfg) {
+  const a = query('git', [...gitDir(cfg.stagingMirror), 'log', '--all', '--format=%aN|%aE']) || '';
+  const c = query('git', [...gitDir(cfg.stagingMirror), 'log', '--all', '--format=%cN|%cE']) || '';
+  return parseIdentities(`${a}\n${c}`);
+}
+
+/**
+ * Pure: would ANY mapping actually change something given the identities present?
+ * (email change → its old email present · targeted name → that name+email present ·
+ * full name normalization → a non-canonical name exists for that email).
+ */
+export function mappingsApplicable(ids, entries) {
+  return (entries || []).some((e) => {
+    if (lc(e.sourceEmail) !== lc(e.email)) return ids.some((id) => lc(id.email) === lc(e.sourceEmail));
+    if (e.sourceName) return ids.some((id) => lc(id.email) === lc(e.email) && lc(id.name) === lc(e.sourceName));
+    return ids.some((id) => lc(id.email) === lc(e.email) && lc(id.name) !== lc(e.name));
+  });
+}
+
+/**
+ * Pure: per-mapping post-rewrite validation. Each entry asserts ONLY what it
+ * intended to change — never failing because a new/canonical identity legitimately
+ * exists. Returns an array of human-readable error strings (empty = all good).
+ *   email changed              → the OLD email must be gone;
+ *   name only, targeted source → that (old name, email) pair must be gone;
+ *   name only, full normalize  → every name for that email is now the canonical name.
+ * @param {Array<{name,email}>} ids identities present AFTER the rewrite
+ * @param {Array<{name,email,sourceName?,sourceEmail}>} entries mailmap entries
+ */
+export function validateMappings(ids, entries) {
+  const errors = [];
+  for (const e of entries || []) {
+    if (lc(e.sourceEmail) !== lc(e.email)) {
+      if (ids.some((id) => lc(id.email) === lc(e.sourceEmail))) {
+        errors.push(`old email <${e.sourceEmail}> still present after rewrite`);
+      }
+    } else if (e.sourceName) {
+      if (ids.some((id) => lc(id.email) === lc(e.email) && lc(id.name) === lc(e.sourceName))) {
+        errors.push(`old name "${e.sourceName}" for <${e.email}> still present after rewrite`);
+      }
+    } else {
+      const stray = [...new Set(ids
+        .filter((id) => lc(id.email) === lc(e.email) && lc(id.name) !== lc(e.name))
+        .map((id) => id.name))];
+      if (stray.length) {
+        errors.push(`name(s) ${stray.map((n) => `"${n}"`).join(', ')} for <${e.email}> were not unified to "${e.name}"`);
+      }
+    }
+  }
+  return errors;
+}
+
 /**
  * Step 3 — write the effective mailmap and rewrite history. Works for both modes:
  * personal (single identity) and team (multi-developer mailmap). Skips only when we
@@ -163,10 +218,11 @@ export async function rewriteHistory(cfg, ui = defaultUi) {
     ui.ok('No identity mappings provided — skipping rewrite.');
     return { rewritten: false };
   }
-  const emails = cfg.rewriteEmails ?? cfg.allOldEmails ?? [];
-  const hasNameOnly = !!cfg.hasNameOnlyMapping;
-  if (!emailsPresent(cfg, emails) && !hasNameOnly) {
-    ui.ok('No matching identities in history — already rewritten, skipping.');
+  const entries = parseMailmap(text);
+  // Nothing to do if none of the mappings' SOURCE identities are present here
+  // (e.g. a team mailmap re-run, or a mapping for emails not in this repo).
+  if (!mappingsApplicable(historyIdentities(cfg), entries)) {
+    ui.ok('No matching identities in history — nothing to remap, skipping.');
     return { rewritten: false };
   }
   const sp = ui.spinner('Rewriting author/committer identities via git-filter-repo').start();
@@ -187,8 +243,11 @@ export async function rewriteHistory(cfg, ui = defaultUi) {
     throw e;
   }
   sp.succeed('History rewritten');
-  if (emails.length && emailsPresent(cfg, emails)) {
-    throw new Error('Safety check failed: a mapped old email still remains in history after the rewrite. Aborting before push.');
+  // Per-mapping safety check: validate exactly what each mapping intended to change.
+  // A name-only remap keeps its email on purpose, so we do NOT require it to vanish.
+  const errors = validateMappings(historyIdentities(cfg), entries);
+  if (errors.length) {
+    throw new Error(`Safety check failed after the rewrite:\n  - ${errors.join('\n  - ')}\nAborting before push.`);
   }
   return { rewritten: true };
 }
