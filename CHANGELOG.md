@@ -4,6 +4,35 @@ All notable changes to `vector-migrate` are documented here. This project follow
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.3.0] - 2026-06-23
+
+### Added
+
+- **Flexible identity remapping** — a mapping can change the **name only** (same
+  email), the **email only**, or **both**, and several source identities can be
+  **unified into one canonical** `Name <email>`. This lets a commit-counting
+  webhook attribute a person correctly even when they committed under multiple
+  usernames on the same email.
+- **`--force-existing`** — opt in to apply new identities to branches that already
+  exist on the destination. Because changing a name/email rewrites history (new
+  SHAs), this is a force-update by definition; Vector warns that SHAs change and
+  never force-pushes existing branches without it.
+
+### Changed
+
+- **Per-mapping safety check.** The post-rewrite validation now verifies exactly
+  what each mapping intended: a name-only remap asserts the old name is gone *for
+  that email* (the email is intentionally kept) instead of demanding the email
+  disappear; an email change still asserts the old email is gone. It no longer
+  false-fails on name-only/unify remaps, nor because a new/canonical identity
+  legitimately already exists.
+- **Idempotent/incremental push to an existing destination.** Branches absent on
+  the destination are pushed, identical ones are skipped (no re-push), and
+  present-but-different ones are skipped by default and reported — with a summary
+  like `Pushed: 3 new · Skipped (already present): 1 (master) · Differs (use
+  --force-existing): 0`. The deterministic rewrite (author+committer dates
+  preserved) makes identical re-runs a true no-op.
+
 ## [2.2.1] - 2026-06-22
 
 ### Changed
@@ -114,6 +143,7 @@ automatically, with cross-platform, OS-aware guidance.
 - Keyless or mis-configured-SSH runs fail fast with guidance instead of failing at
   the push after a full mirror clone.
 
+[2.3.0]: https://github.com/YRACHEK101/Vector/releases/tag/v2.3.0
 [2.2.1]: https://github.com/YRACHEK101/Vector/releases/tag/v2.2.1
 [2.2.0]: https://github.com/YRACHEK101/Vector/releases/tag/v2.2.0
 [2.1.1]: https://github.com/YRACHEK101/Vector/releases/tag/v2.1.1

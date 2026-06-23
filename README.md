@@ -212,6 +212,26 @@ Alice New <alice@newco.com> <alice@oldcorp.com>
 Bob New <bob@newco.com> <bob@oldcorp.com>
 ```
 
+### Remapping: name-only, email-only, or unify many into one
+
+A mapping can change the **name only**, the **email only**, or **both** — and several source identities can be **unified into one canonical** `Name <email>`:
+
+```
+# Name only (email kept) — normalizes EVERY commit with this email to one name.
+# Use this to unify a person who committed under several usernames:
+#   YRACHEK101 <yrachek@liadtech.com>, Y. Rachek <…>, yRachek <…>  →  YRACHEK101 <…>
+YRACHEK101 <yrachek@liadtech.com>
+
+# Email only / both — map an old identity to a new name and verified email:
+YRACHEK101 <yrachek@github.com> <yrachek@liadtech.com>
+
+# Unify several different source identities into one canonical identity:
+Canonical Name <canonical@company.com> Old Name <old1@corp.com>
+Canonical Name <canonical@company.com> <old2@corp.com>
+```
+
+Vector validates **per mapping** exactly what each change intended: a name-only remap only requires the **old name to be gone for that email** (the email is kept on purpose); an email change requires the **old email to be gone**. It never errors just because the new/canonical identity already legitimately exists in history. This is what makes a commit-counting webhook attribute a person correctly even when they committed under several usernames.
+
 ---
 
 ## Non-Interactive / Scripted Runs
@@ -259,6 +279,7 @@ vector-migrate --non-interactive
 | `--branch <name>` | `PUSH_BRANCHES` | Limit to specific branch(es); **repeatable** (also `--branches "a,b"`). **Default: all branches** |
 | `--all-branches` | `ALL_BRANCHES` | Migrate every branch (the default) |
 | `--force` | — | Allow force-push **only** on a true divergence |
+| `--force-existing` | — | Apply new identities to branches **already on the destination** (force-update — commit SHAs change for those branches) |
 | `--non-interactive` | — | Skip all prompts (the mapping must be complete) |
 | `-y`, `--yes` | — | Assume "yes" at the confirm gate |
 | `--check` | — | Validate tools, config **and GitHub SSH access**, then exit |
@@ -417,6 +438,20 @@ Migration is rarely one-and-done. Re-run Vector any time new commits land on Azu
 - **Re-applies the identity rewrite deterministically**, so commits already on GitHub keep the exact same SHAs.
 - **Fast-forwards just the delta** onto GitHub — existing history is left byte-for-byte intact.
 - **Never overwrites GitHub.** If the remote is ahead or has genuinely diverged, Vector stops instead of clobbering — it only force-pushes a true divergence with an explicit `--force`.
+
+### Re-running against an already-migrated repo
+
+Vector is idempotent against an existing destination. Before pushing, it inspects the destination's refs and, per branch:
+
+- **Not on the destination** → pushed.
+- **Already present and identical** → skipped (no re-push).
+- **Already present but different** → skipped by default and reported — never silently overwritten.
+
+It prints a summary, e.g. `Pushed: 3 new · Skipped (already present): 1 (master) · Differs (use --force-existing): 0`. Because the rewrite is deterministic (author **and** committer dates preserved, stable mapping order), an identical re-run reproduces identical SHAs and is a true no-op — so you can safely "add the remaining branches" without touching the ones already pushed.
+
+### Applying new identities to branches already pushed (`--force-existing`)
+
+Changing an author's **name or email necessarily rewrites history** — those commits get **new SHAs** — so updating a branch that's already on the destination is, by definition, a **force-update**. Vector never does this implicitly. Pass `--force-existing` to opt in: branches that exist on the destination but differ because of the new mapping are force-pushed, after a warning that their commit SHAs will change. Branches not yet on the destination are still pushed normally; identical ones are still skipped.
 
 ---
 
