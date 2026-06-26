@@ -6,9 +6,12 @@
 // ─────────────────────────────────────────────────────────────────────────────
 import { readFileSync, existsSync } from 'node:fs';
 import { ui, c } from './ui.js';
+import { createLogger } from './logger.js';
 import {
   configFromEnv, mergeConfigs, finalizeConfig, validateRun, parseBranches, parseEmails,
+  EXIT, VectorError,
 } from './config.js';
+import { MODES } from './modes.js';
 import { checkPrerequisites } from './prereqs.js';
 import { doctor } from './doctor.js';
 import { migrate, ensureSshReady, syncSourceMirror, listAuthors, listBranches, formatPushSummary } from './pipeline.js';
@@ -26,22 +29,29 @@ function version() {
 }
 
 const HELP = `
-${c.bold('vector-migrate')} — interactive, zero-token Azure DevOps → GitHub migration
+${c.bold('vector-migrate')} — interactive, zero-token repository migration with identity rewriting
 
 ${c.bold('USAGE')}
   vector-migrate [options]
 
-Run with no options for the guided flow: it mirrors the Azure repo, scans every
-author and branch, maps YOU to your new identity (keeping everyone else), then
-rewrites and pushes all branches. Map more authors at the confirm step to migrate
-a whole team — same single flow.
+Run with no options for the guided flow: pick a mode, then it mirrors the source,
+scans every author and branch, maps YOU to your new identity (keeping everyone
+else), rewrites, pushes all branches + tags, and verifies commit integrity.
+
+${c.bold('MODES')} (skip the menu with --mode)
+  a   🟦 Azure DevOps ➔ GitHub   (identity / email rewriting)
+  b   🟩 Azure DevOps ➔ GitHub   (mirror only — no rewriting)
+  c   🟪 GitHub ➔ GitHub          (identity / email rewriting)
+  --mode <a|b|c>             MODE
+  (A rewrite whose mapping matches 0 commits auto-falls-back to a verbatim mirror.)
 
 ${c.bold('SOURCE & DESTINATION')}
-  --azure-url <url>          AZURE_URL          Azure DevOps repo URL (always provided)
-  --github-ssh <url>         GITHUB_SSH         Destination GitHub repo (SSH form)
+  --source <url>             SOURCE             Source repo (Azure or GitHub; HTTPS or SSH)
+  --dest <url>               DEST               Destination GitHub repo (SSH recommended)
   --ssh-key <path>           SSH_KEY            Private key for the SSH push
+  (Legacy aliases still work: --azure-url/AZURE_URL, --github-ssh/GITHUB_SSH.)
 
-${c.bold('IDENTITY MAPPING')} (any combination; highest precedence first)
+${c.bold('IDENTITY MAPPING')} (modes A/C; any combination, highest precedence first)
   --mailmap <path>           MAILMAP            git mailmap file (full mapping for CI)
   --map "old=New <new>"      MAPS               Inline mapping, repeatable
   --old-email <email>        OLD_EMAIL          Legacy single-identity: your old email
@@ -50,19 +60,26 @@ ${c.bold('IDENTITY MAPPING')} (any combination; highest precedence first)
   --extra-old-emails <list>  EXTRA_OLD_EMAILS   More old emails of yours (comma sep)
 
 ${c.bold('BRANCHES & SAFETY')}
-  --branch <name>            PUSH_BRANCHES      Limit to specific branch (repeatable)
+  --branch <name>            PUSH_BRANCHES      Limit to specific branch (repeatable; skips tags)
   --all-branches             ALL_BRANCHES       Every branch (this is the default)
+  --sync                     SYNC               Incremental sync onto an existing target (ff-only; prompts on divergence)
   --force                                       Allow force-push only on TRUE divergence
   --force-existing                              Apply new identities to branches ALREADY on the destination
                                                 (force-update — commit SHAs change for those branches)
 
 ${c.bold('GENERAL')}
   --project <slug>           PROJECT            Local folder slug (auto-derived)
+  --work-dir <path>          WORK_DIR           Staging directory (default ./.vector-staging)
+  --json                     JSON               Machine-readable log output
+  -v, --verbose
   -y, --yes                                     Assume "yes" at the confirm gate
-  --non-interactive                             No prompts (mapping must be complete)
-  --check, --dry-run                            Validate tools + config, change nothing
+  --non-interactive                             No prompts (rewrite modes need a complete mapping)
+  --dry-run                                     Plan + rewrite locally; perform NO remote writes
+  --check                                       Validate tools + config only, change nothing
   --doctor                                      Diagnose your environment (PASS/FAIL + fixes), change nothing
   -h, --help / -V, --version
+
+${c.bold('EXIT CODES')}  0 ok · 2 bad input · 3 git failure · 4 integrity mismatch · 5 divergence needs a decision
 `;
 
 const VALUE_FLAGS = {
@@ -70,12 +87,15 @@ const VALUE_FLAGS = {
   '--extra-old-emails': 'extraOldEmails', '--new-name': 'newName', '--new-email': 'newEmail',
   '--project': 'project', '--branches': 'branchesInput', '--ssh-key': 'sshKey',
   '--mailmap': 'mailmapPath',
+  // New surface
+  '--mode': 'mode', '--source': 'source', '--dest': 'dest', '--work-dir': 'workDir',
 };
 
 export function parseArgs(argv) {
   const opts = {
     help: false, version: false, check: false, doctor: false, force: false, forceExisting: false,
     assumeYes: false, nonInteractive: false, allBranches: false,
+    dryRun: false, sync: false, json: false, verbose: false,
     interactive: !!process.stdin.isTTY,
     overrides: {}, branchList: [], mapList: [],
   };
@@ -83,7 +103,11 @@ export function parseArgs(argv) {
     const a = argv[i];
     if (a === '-h' || a === '--help') opts.help = true;
     else if (a === '-V' || a === '--version') opts.version = true;
-    else if (a === '--check' || a === '--dry-run') opts.check = true;
+    else if (a === '--check') opts.check = true;
+    else if (a === '--dry-run') opts.dryRun = true;
+    else if (a === '--sync') opts.sync = true;
+    else if (a === '--json') opts.json = true;
+    else if (a === '-v' || a === '--verbose') opts.verbose = true;
     else if (a === '--doctor') opts.doctor = true;
     else if (a === '--force') opts.force = true;
     else if (a === '--force-existing') opts.forceExisting = true;
@@ -111,6 +135,10 @@ function assembleConfig(opts) {
   if (opts.force) ov.force = true;
   if (opts.forceExisting) ov.forceExisting = true;
   if (opts.allBranches) ov.allBranches = true;
+  if (opts.dryRun) ov.dryRun = true;
+  if (opts.sync) ov.sync = true;
+  if (opts.json) ov.json = true;
+  if (opts.verbose) ov.verbose = true;
   if (opts.mapList.length) ov.maps = opts.mapList;
   return mergeConfigs(env, ov);
 }
@@ -136,12 +164,12 @@ function branchDisplay(final) {
   return 'ALL (every branch — default)';
 }
 
-function printVerification(result) {
-  ui.step('Verification');
+function printVerification(result, log = ui) {
+  log.step('Verification');
   for (const v of result.verification) {
-    if (v.status === 'in-sync') ui.ok(`[${v.branch}] OK — remote == local (${v.localSha})`);
-    else if (v.status === 'missing-local') ui.warn(`[${v.branch}] not in source — skipped`);
-    else ui.warn(`[${v.branch}] left intentionally untouched (${v.status})`);
+    if (v.status === 'in-sync') log.ok(`[${v.branch}] OK — remote == local (${v.localSha})`);
+    else if (v.status === 'missing-local') log.warn(`[${v.branch}] not in source — skipped`);
+    else log.warn(`[${v.branch}] left intentionally untouched (${v.status})`);
   }
 }
 
@@ -204,50 +232,69 @@ function runCheck(cfg) {
 }
 
 export async function run(argv) {
-  const opts = parseArgs(argv);
+  let opts;
+  try {
+    opts = parseArgs(argv); // bad flags / missing flag values are usage errors
+  } catch (e) {
+    throw new VectorError(e.message, EXIT.USAGE);
+  }
   if (opts.help) { console.log(HELP); return; }
   if (opts.version) { console.log(version()); return; }
   if (opts.doctor) { const res = doctor({ version: version() }); if (!res.ok) process.exitCode = 1; return; }
 
-  ui.banner('🧭 vector-migrate — Azure DevOps → GitHub migration');
+  // --json implies non-interactive (machine output, no prompts).
+  if (opts.json) opts.interactive = false;
+  const log = createLogger({ json: opts.json, verbose: opts.verbose });
+
+  log.banner('🧭 vector-migrate — repository migration with identity rewriting');
 
   let cfg = assembleConfig(opts);
+  if (cfg.mode && !['a', 'b', 'c'].includes(String(cfg.mode).trim().toLowerCase())) {
+    throw new VectorError(`Invalid --mode "${cfg.mode}" (expected a, b, or c).`, EXIT.USAGE);
+  }
 
   if (opts.check) { runCheck(cfg); return; }
 
   // ── Validate host tools up front ──
   const pre = checkPrerequisites();
-  if (!pre.ok) { printPrereqs(pre); throw new Error('Required tools are missing (see guidance above).'); }
+  if (!pre.ok) { printPrereqs(pre); throw new VectorError('Required tools are missing (see guidance above).', EXIT.USAGE); }
+
+  // ── Step 0: pick a mode (interactive menu when none was supplied) ──
+  if (!cfg.mode && opts.interactive) {
+    const { chooseMode } = await import('./wizard.js');
+    cfg = mergeConfigs(cfg, { mode: await chooseMode() });
+  }
 
   // ── Steps 1–2: source URL + destination (prompt only what's missing) ──
-  if ((!cfg.azureUrl || !cfg.githubSsh) && opts.interactive) {
+  if ((!(cfg.azureUrl || cfg.source) || !(cfg.githubSsh || cfg.dest)) && opts.interactive) {
     const { runBaseWizard } = await import('./wizard.js');
-    cfg = mergeConfigs(cfg, await runBaseWizard(cfg));
+    const sourceLabel = (cfg.mode === 'c')
+      ? 'GitHub source repo URL (HTTPS or SSH):'
+      : 'Azure DevOps repository URL:';
+    cfg = mergeConfigs(cfg, await runBaseWizard(cfg, { sourceLabel }));
   }
   cfg = withMailmapFile(cfg);
   let final = finalizeConfig(cfg);
 
   // ── Fail-fast SSH preflight before any mirror/rewrite work ──
-  // Detects a missing key (stops with OS-specific ssh-keygen guidance), trusts
-  // host keys, and verifies GitHub auth (always) + Azure auth (only when the
-  // source url is SSH). Skips automatically for non-SSH targets. On success we
-  // mark the config so migrate() doesn't re-probe the network a second time.
-  await ensureSshReady(final, ui);
+  await ensureSshReady(final, log);
   cfg = mergeConfigs(cfg, { skipSshPreflight: true });
   final = finalizeConfig(cfg);
 
-  // ── Steps 3–5 (interactive): mirror → scan → map identities ──
+  // ── Steps 3–5 (interactive rewrite modes): mirror → scan → map identities ──
+  // Mirror mode (B, or an inferred 0-mapping run) needs no identity mapping.
   const haveMapping = !!(final.mailmapText && final.mailmapText.trim());
-  if (opts.interactive && !haveMapping) {
+  const wantsRewrite = final.baseStrategy === 'rewrite';
+  if (opts.interactive && wantsRewrite && !haveMapping) {
     const baseV = validateRun(final, { interactive: true });
-    if (!baseV.ok) throw new Error(`Incomplete configuration:\n  - ${baseV.errors.join('\n  - ')}`);
+    if (!baseV.ok) throw new VectorError(`Incomplete configuration:\n  - ${baseV.errors.join('\n  - ')}`, EXIT.USAGE);
 
-    ui.step('Mirroring the Azure repository and scanning authors + branches');
-    await syncSourceMirror(final, ui);
+    log.step('Mirroring the source repository and scanning authors + branches');
+    await syncSourceMirror(final, log);
     const identities = listAuthors(final); // scans the fetched mirror, never a local clone
     const branchesAvail = listBranches(final, final.sourceMirror);
-    if (!identities.length) throw new Error('No author identities found in the mirrored repository.');
-    ui.ok(`Detected ${identities.length} author(s) across ${branchesAvail.length} branch(es).`);
+    if (!identities.length) throw new VectorError('No author identities found in the mirrored repository.', EXIT.GIT);
+    log.ok(`Detected ${identities.length} author(s) across ${branchesAvail.length} branch(es).`);
 
     const { runMappingWizard } = await import('./wizard.js');
     const entries = await runMappingWizard(identities);
@@ -259,28 +306,33 @@ export async function run(argv) {
 
   // ── Validate completeness (strict in non-interactive) ──
   const v = validateRun(final, { interactive: opts.interactive });
-  if (!v.ok) throw new Error(`Incomplete configuration:\n  - ${v.errors.join('\n  - ')}`);
+  if (!v.ok) throw new VectorError(`Incomplete configuration:\n  - ${v.errors.join('\n  - ')}`, EXIT.USAGE);
 
   // ── Summary ──
-  ui.step('Summary');
-  ui.info(`  ${c.dim('Source     :')} ${final.azureUrl}`);
-  ui.info(`  ${c.dim('Destination:')} ${final.githubSsh}`);
-  ui.info(`  ${c.dim('Branches   :')} ${branchDisplay(final)}`);
+  log.step('Summary');
+  log.info(`  ${c.dim('Mode       :')} ${MODES[final.mode] ? MODES[final.mode].label : final.mode}`);
+  log.info(`  ${c.dim('Strategy   :')} ${final.baseStrategy}${final.sync ? ' · sync (ff-only)' : ''}${final.dryRun ? ' · DRY-RUN (no writes)' : ''}`);
+  log.info(`  ${c.dim('Source     :')} ${final.azureUrl}`);
+  log.info(`  ${c.dim('Destination:')} ${final.githubSsh}`);
+  log.info(`  ${c.dim('Branches   :')} ${branchDisplay(final)}`);
   if (final._identities) {
     const s = summarizeMapping(final._identities, parseMailmap(final.mailmapText));
-    ui.info(`  ${c.dim('Identities :')} ${s.authors} authors · ${s.mapped} mapped · ${s.unchanged} kept`);
+    log.info(`  ${c.dim('Identities :')} ${s.authors} authors · ${s.mapped} mapped · ${s.unchanged} kept`);
+  } else if (wantsRewrite) {
+    log.info(`  ${c.dim('Identities :')} ${final.rewriteEmails.length} mapped, others kept`);
   } else {
-    ui.info(`  ${c.dim('Identities :')} ${final.rewriteEmails.length} mapped, others kept`);
+    log.info(`  ${c.dim('Identities :')} mirror — copied verbatim (no rewrite)`);
   }
 
   // ── Confirm gate (interactive) ──
   if (opts.interactive && !opts.assumeYes) {
     const { confirmProceed } = await import('./wizard.js');
     const n = final.rewriteEmails.length;
-    const msg = n > 1
-      ? `This rewrites ${n} identities — including OTHER people's commits. Proceed and push?`
-      : 'Rewrite history and push?';
-    if (!(await confirmProceed(msg))) { ui.warn('Aborted — no changes were made.'); return; }
+    const msg = !wantsRewrite
+      ? (final.dryRun ? 'Plan this mirror (dry-run, no writes)?' : 'Mirror this repository to the destination?')
+      : (final.dryRun ? 'Plan this rewrite (dry-run, no writes)?'
+        : (n > 1 ? `This rewrites ${n} identities — including OTHER people's commits. Proceed and push?` : 'Rewrite history and push?'));
+    if (!(await confirmProceed(msg))) { log.warn('Aborted — no changes were made.'); return; }
   }
 
   // Interactive runs get to choose how branch-name conflicts are resolved;
@@ -290,10 +342,21 @@ export async function run(argv) {
     final._resolveConflicts = (conflicts) => chooseConflictResolution(conflicts);
   }
 
-  // ── Steps 3,6: mirror (idempotent) → rewrite → ancestry-aware push, all branches ──
-  const result = await migrate(final, ui);
-  printVerification(result);
-  ui.step('Push summary');
-  ui.info(`  ${formatPushSummary(result.pushes)}`);
-  ui.ok('\n✅ Migration complete. Every mapped author keeps attribution at original commit dates.');
+  // ── mirror (idempotent) → [rewrite] → ancestry-aware push → integrity verify ──
+  const result = await migrate(final, log);
+  if (result.fallback) log.warn(`Note: ${result.fallback}`);
+  printVerification(result, log);
+  log.step('Push summary');
+  log.info(`  ${formatPushSummary(result.pushes)}`);
+  if (result.tagPushes && result.tagPushes.length) {
+    const created = result.tagPushes.filter((t) => t.strategy === 'create').length;
+    const updated = result.tagPushes.filter((t) => t.strategy === 'update').length;
+    log.info(`  Tags: ${created} created · ${updated} updated · ${result.tagPushes.length} total`);
+  }
+  if (final.dryRun) {
+    log.ok('\n✅ Dry-run complete — planned everything above, wrote nothing to the destination.');
+  } else {
+    log.ok('\n✅ Migration complete — integrity verified (ref set + tip OIDs + commit count match).');
+  }
+  if (log.json) log.event('done', { mode: result.mode, strategy: result.strategy, integrity: result.integrity, branches: result.branches });
 }

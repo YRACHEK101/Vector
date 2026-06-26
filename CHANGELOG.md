@@ -4,6 +4,31 @@ All notable changes to `vector-migrate` are documented here. This project follow
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.4.0] - 2026-06-26
+
+### Added
+
+- **Three routing modes**, chosen from a one-screen interactive menu or `--mode a|b|c`:
+  - **A** — Azure DevOps ➔ GitHub with identity/email rewriting.
+  - **B** — Azure DevOps ➔ GitHub, **mirror only** (a fast, verbatim bare-mirror copy — bypasses `git-filter-repo` entirely).
+  - **C** — **GitHub ➔ GitHub** with identity rewriting; the source URL may be HTTPS **or** SSH (normalized internally).
+- **0-commit auto-fallback.** A rewrite mode whose mapping matches **0 commits** automatically downgrades to the verbatim mirror path and logs why — rewriting nothing would only churn SHAs.
+- **Zero-miss integrity engine** (`src/integrity.js`). After every push, Vector compares the migrated mirror against the destination across the **full ref set (branches + tags), each ref-tip OID, and the reachable commit count**, and aborts with a precise report (**exit 4**) on any mismatch. Tags now migrate alongside branches.
+- **`--sync`** — incremental, fast-forward-only sync onto an existing target; a true ancestry **divergence stops with exit code 5** (never a silent clobber, never a crash). Mirror semantics use `--force-with-lease`, never a bare `--force`.
+- **`--dry-run`** — plan and rewrite locally, report the push plan, perform **no remote writes**.
+- **`--source`/`--dest`** aliases, **`--work-dir`** (staging now defaults to `./.vector-staging`), **`--json`** machine-readable output, and **`-v/--verbose`**.
+- **Documented exit codes**: `0` ok · `2` bad input · `3` git failure · `4` integrity mismatch · `5` divergence.
+
+### Changed
+
+- The interactive flow now starts with the mode menu, then prompts only for what's missing.
+- Staging artifacts live under one work dir (`./.vector-staging`) instead of the current directory.
+- All legacy flags/env (`--azure-url`/`AZURE_URL`, `--github-ssh`/`GITHUB_SSH`, the `--old-email`/`--new-*` trio, `--mailmap`, `--map`, `--branch`, `--force`, `--force-existing`, `--non-interactive`, `--check`) remain fully supported.
+
+### Notes
+
+- Email rewriting **changes commit SHAs by design** (a SHA includes the author/committer identity). Vector's rewrite is **deterministic** — identical input + mapping yields byte-identical output SHAs — so re-syncs only ever fast-forward the destination and never force-rewrite already-pushed history. A `.mailmap` is display-only and is not honored by GitHub for attribution; Vector rewrites the actual commit emails.
+
 ## [2.3.2] - 2026-06-23
 
 ### Fixed

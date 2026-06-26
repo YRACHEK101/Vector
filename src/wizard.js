@@ -28,14 +28,33 @@ async function loadInquirer() {
   }
 }
 
-/** Steps 1–2: the Azure source, the GitHub destination, and a local slug. */
-export async function runBaseWizard(initial = {}) {
+/** Step 0: pick the migration mode (A/B/C). Returns 'a' | 'b' | 'c'. */
+export async function chooseMode() {
   const inquirer = await loadInquirer();
-  return inquirer.prompt([
-    { type: 'input', name: 'azureUrl', message: 'Azure DevOps repository URL:', default: initial.azureUrl || undefined, validate: required },
-    { type: 'input', name: 'githubSsh', message: 'GitHub destination (SSH, git@github.com:USER/REPO.git):', default: initial.githubSsh || undefined, validate: required },
-    { type: 'input', name: 'project', message: 'Local project slug (folder names):', default: (a) => initial.project || deriveProjectSlug(a.githubSsh) || 'repo' },
-  ]);
+  const { mode } = await inquirer.prompt([{
+    type: 'list', name: 'mode', message: 'What kind of migration?', default: 'a',
+    choices: [
+      { name: '🟦  A — Azure DevOps ➔ GitHub   (identity / email rewriting)', value: 'a' },
+      { name: '🟩  B — Azure DevOps ➔ GitHub   (mirror only — no rewriting)', value: 'b' },
+      { name: '🟪  C — GitHub ➔ GitHub          (identity / email rewriting)', value: 'c' },
+    ],
+  }]);
+  return mode;
+}
+
+/** Steps 1–2: the source URL, the GitHub destination, and a local slug (only the missing ones are asked). */
+export async function runBaseWizard(initial = {}, { sourceLabel = 'Azure DevOps repository URL:' } = {}) {
+  const inquirer = await loadInquirer();
+  const haveSource = !!(initial.azureUrl || initial.source);
+  const haveDest = !!(initial.githubSsh || initial.dest);
+  const questions = [];
+  if (!haveSource) questions.push({ type: 'input', name: 'azureUrl', message: sourceLabel, default: initial.azureUrl || initial.source || undefined, validate: required });
+  if (!haveDest) questions.push({ type: 'input', name: 'githubSsh', message: 'GitHub destination (SSH, git@github.com:USER/REPO.git):', default: initial.githubSsh || initial.dest || undefined, validate: required });
+  questions.push({
+    type: 'input', name: 'project', message: 'Local project slug (folder names):',
+    default: (a) => initial.project || deriveProjectSlug(a.githubSsh || initial.githubSsh || initial.dest) || 'repo',
+  });
+  return inquirer.prompt(questions);
 }
 
 /**

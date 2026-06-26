@@ -76,7 +76,20 @@ test('finalizeConfig derives slug, mirror paths, and de-duped old emails', () =>
   assert.equal(final.project, 'cool-repo');
   assert.deepEqual(final.branches, ['master', 'main']);
   assert.deepEqual(final.allOldEmails, ['o@x.com', 'e@x.com']);
-  assert.equal(final.sourceMirror, '/tmp/work/cool-repo-source.git');
-  assert.equal(final.stagingMirror, '/tmp/work/cool-repo-migration.git');
+  // Staging now lives under a single work dir (default ./.vector-staging) so the host stays tidy.
+  assert.equal(final.workDir, '/tmp/work/.vector-staging');
+  assert.equal(final.sourceMirror, '/tmp/work/.vector-staging/cool-repo-source.git');
+  assert.equal(final.stagingMirror, '/tmp/work/.vector-staging/cool-repo-migration.git');
   assert.match(final.gitEnv.GIT_SSH_COMMAND, /BatchMode=yes/);
+});
+
+test('finalizeConfig honors --work-dir override for all staging paths', () => {
+  const final = finalizeConfig(
+    { githubSsh: 'git@github.com:u/cool-repo.git', workDir: '/custom/stage' },
+    { cwd: '/tmp/work' },
+  );
+  assert.equal(final.workDir, '/custom/stage');
+  assert.equal(final.sourceMirror, '/custom/stage/cool-repo-source.git');
+  assert.equal(final.stagingMirror, '/custom/stage/cool-repo-migration.git');
+  assert.equal(final.mailmapFile, '/custom/stage/cool-repo-mailmap.txt');
 });

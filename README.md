@@ -29,9 +29,11 @@ npx vector-migrate@latest          # run the interactive wizard — no install r
 
 ## What is Vector?
 
-Vector (`vector-migrate`) is an **interactive, zero-token** NPM command-line utility that bridges your Git repositories from **Azure DevOps** to **GitHub** seamlessly.
+Vector (`vector-migrate`) is an **interactive, zero-token** NPM command-line utility that moves your Git repositories to **GitHub** — from **Azure DevOps** or from **another GitHub repo** — seamlessly.
 
 It preserves your complete commit history and re-attributes your authorship — restoring your contribution graph — via a deterministic `git-filter-repo` rewrite and a hang-proof SSH push. No Personal Access Tokens to leak, no script to edit.
+
+It offers **three routing modes** (Azure→GitHub with rewriting, Azure→GitHub mirror-only, and GitHub→GitHub with rewriting), a **0-commit auto-fallback** to a verbatim mirror when there's nothing to rewrite, and a **zero-miss integrity engine** that verifies every branch + tag tip and the commit count after each push. See [Migration modes](#migration-modes).
 
 ---
 
@@ -71,7 +73,39 @@ pip install git-filter-repo                  # Windows (needs Python; run in Git
 npx vector-migrate@latest
 ```
 
-That's it. The interactive wizard prompts for your Azure source, GitHub destination, and identity details, then does the rest. See [Prerequisites: git-filter-repo](#prerequisites-git-filter-repo) for per-OS detail.
+That's it. The interactive wizard first asks **which kind of migration** you want, then prompts only for what's missing (source, destination, and — for rewrite modes — your identity), then does the rest. See [Prerequisites: git-filter-repo](#prerequisites-git-filter-repo) for per-OS detail.
+
+---
+
+## Migration modes
+
+On startup (when you don't pass `--mode`) Vector shows a one-screen menu:
+
+| Mode | Route | Identity rewrite? | Non-interactive |
+|------|-------|-------------------|-----------------|
+| **A** 🟦 | Azure DevOps ➔ GitHub | **Yes** — rewrites author/committer emails so GitHub attributes commits to you | `--mode a` |
+| **B** 🟩 | Azure DevOps ➔ GitHub | **No** — a fast, verbatim bare-mirror copy | `--mode b` |
+| **C** 🟪 | GitHub ➔ GitHub | **Yes** — same deterministic rewrite; source URL may be HTTPS **or** SSH | `--mode c` |
+
+Each menu choice maps 1:1 to `--mode a|b|c`, so scripted/CI runs never need a TTY.
+
+- **0-commit auto-fallback.** If you choose a rewrite mode (A/C) but the old email matches **0 commits** in the history, Vector automatically downgrades to the mirror path (Mode B) and tells you why — rewriting nothing would only churn SHAs for no benefit.
+- **Why rewriting changes SHAs (by design).** A commit's SHA is derived from its content *including* the author/committer identity, so changing an email necessarily produces new SHAs. Vector's rewrite is **deterministic**: the same input history + mapping yields byte-identical output SHAs every run, so re-syncs only ever **fast-forward** the destination — they never force-rewrite already-pushed history. (A `.mailmap` alone is display-only and is *not* honored by GitHub for attribution — Vector rewrites the actual commit emails.)
+
+```bash
+# Mode A — Azure ➔ GitHub with rewrite (non-interactive)
+vector-migrate --mode a \
+  --source "https://org@dev.azure.com/org/proj/_git/repo" \
+  --dest   "git@github.com:you/repo.git" \
+  --old-email old@corp.com --new-name you --new-email you@users.noreply.github.com --yes
+
+# Mode B — Azure ➔ GitHub, verbatim mirror (no rewrite)
+vector-migrate --mode b --source "<azure-url>" --dest "git@github.com:you/repo.git" --yes
+
+# Mode C — GitHub ➔ GitHub with rewrite (HTTPS or SSH source)
+vector-migrate --mode c --source "https://github.com/old-org/repo" --dest "git@github.com:you/repo.git" \
+  --old-email old@corp.com --new-email you@users.noreply.github.com --yes
+```
 
 ---
 
@@ -269,8 +303,11 @@ vector-migrate --non-interactive
 
 | Flag | Env var | Meaning |
 | --- | --- | --- |
-| `--azure-url` | `AZURE_URL` | Source Azure DevOps repo URL |
-| `--github-ssh` | `GITHUB_SSH` | Destination GitHub repo (SSH form) |
+| `--mode <a\|b\|c>` | `MODE` | Migration mode (skips the menu): A/C rewrite identities, B mirrors verbatim. [Modes](#migration-modes) |
+| `--source <url>` | `SOURCE` | Source repo (Azure or GitHub; HTTPS or SSH). Alias of `--azure-url` |
+| `--dest <url>` | `DEST` | Destination GitHub repo (SSH recommended). Alias of `--github-ssh` |
+| `--azure-url` | `AZURE_URL` | Source repo URL (legacy alias of `--source`) |
+| `--github-ssh` | `GITHUB_SSH` | Destination GitHub repo (legacy alias of `--dest`) |
 | `--ssh-key` | `SSH_KEY` | Private key for the SSH push |
 | `--mailmap <path>` | `MAILMAP` | git mailmap file — full multi-author mapping (ideal for CI) |
 | `--map "old=New <new>"` | `MAPS` | Inline identity mapping; **repeatable** |
@@ -278,14 +315,31 @@ vector-migrate --non-interactive
 | `--new-name` | `NEW_NAME` | …mapped to this author name |
 | `--new-email` | `NEW_EMAIL` | …and this verified GitHub email |
 | `--extra-old-emails` | `EXTRA_OLD_EMAILS` | More old emails of yours (comma-separated) |
-| `--branch <name>` | `PUSH_BRANCHES` | Limit to specific branch(es); **repeatable** (also `--branches "a,b"`). **Default: all branches** |
+| `--branch <name>` | `PUSH_BRANCHES` | Limit to specific branch(es); **repeatable** (also `--branches "a,b"`). Narrowing **skips tags**. **Default: all branches + tags** |
 | `--all-branches` | `ALL_BRANCHES` | Migrate every branch (the default) |
+| `--sync` | `SYNC` | Incremental sync onto an existing target: fast-forward only; **prompts/stops on a true divergence** |
+| `--dry-run` | — | Plan + rewrite locally, report the push plan, perform **no remote writes** |
 | `--force` | — | Allow force-push **only** on a true divergence |
 | `--force-existing` | — | Apply new identities to branches **already on the destination** (force-update — commit SHAs change for those branches) |
-| `--non-interactive` | — | Skip all prompts (the mapping must be complete) |
+| `--work-dir <path>` | `WORK_DIR` | Staging directory (default `./.vector-staging`) |
+| `--json` | `JSON` | Machine-readable, one-JSON-object-per-line output (implies non-interactive) |
+| `-v`, `--verbose` | — | Extra diagnostic output |
+| `--non-interactive` | — | Skip all prompts (rewrite modes need a complete mapping; mirror modes don't) |
 | `-y`, `--yes` | — | Assume "yes" at the confirm gate |
-| `--check` | — | Validate tools, config **and GitHub SSH access**, then exit |
+| `--check` | — | Validate tools, config **and GitHub SSH access**, then exit (no clone) |
 | `--project` | `PROJECT` | Local folder slug (auto-derived) |
+
+### Exit codes
+
+Scripts can branch on the process exit code:
+
+| Code | Meaning |
+| --- | --- |
+| `0` | Success |
+| `2` | Bad input / usage (unknown flag, invalid `--mode`, incomplete config) |
+| `3` | git / subprocess failure |
+| `4` | **Integrity mismatch** — the destination does not match the migrated history (see below) |
+| `5` | **Divergence** — a `--sync` cannot fast-forward a branch; a human decision is needed |
 
 ---
 
@@ -473,7 +527,34 @@ Changing an author's **name or email necessarily rewrites history** — those co
                           └──────────────┘   (teammates untouched)
 ```
 
-A pristine **source mirror** is the only thing fetched into; a disposable **staging copy** is rebuilt and rewritten each run; the **push is ancestry-aware** (create / no-op / fast-forward / skip-if-ahead / confirm-on-divergence).
+A pristine **source mirror** is the only thing fetched into; a disposable **staging copy** is rebuilt and rewritten each run; the **push is ancestry-aware** (create / no-op / fast-forward / skip-if-ahead / confirm-on-divergence). For a verbatim **Mode B** mirror (or the 0-commit auto-fallback) step 2 is skipped entirely.
+
+### Zero-miss commit integrity
+
+A matching commit *count* is necessary but not sufficient — two different histories can share a count. After every push (it's skipped on `--dry-run`, which writes nothing), Vector compares the migrated staging mirror against the destination across **three** axes:
+
+1. **the full ref set** — every branch **and** tag we synced exists on the destination;
+2. **each ref-tip OID** — the destination tip equals the migrated tip, exactly;
+3. **the reachable commit count** — equal on both sides.
+
+For rewrite modes the comparison is against the **post-rewrite** mirror, so OIDs legitimately differ from the original source — that's expected. The rewrite runs with `--prune-empty=never` so counts stay 1:1. On any mismatch Vector aborts with a precise report (which refs differ, the count delta) and **exit code 4** — it never reports success on a mismatch. Branches you deliberately left untouched (a destination that's ahead, or a divergence you didn't force) are reported but don't fail the check, since the remote legitimately differs there.
+
+### Safe multi-run sync (`--sync`)
+
+`--sync` reuses the existing source mirror (delta fetch only), re-applies the **deterministic** rewrite so already-migrated commits keep their existing rewritten OIDs, and pushes new commits as a **fast-forward**. If a branch has genuinely **diverged** (the destination moved in a way that isn't a fast-forward of the rewritten history), Vector **stops with exit code 5** and tells you which refs diverged and how to proceed — it never silently clobbers and never crashes. Mirror semantics, when they require it, use `--force-with-lease` (a compare-and-swap) — never a bare `--force`.
+
+---
+
+## Troubleshooting
+
+| Symptom | Cause & fix |
+| --- | --- |
+| `git-filter-repo is not installed` | Install it for your OS (see [Prerequisites](#prerequisites-git-filter-repo)); verify with `git filter-repo --version`. Vector fails fast rather than doing partial work. |
+| **Exit 5** — "Branch … has DIVERGED" | The destination branch isn't a fast-forward of the rewritten history. Inspect it, then re-run with `--force-existing` to apply the new history (its SHAs change), or `--branch` to exclude it. Vector never overwrites it for you. |
+| **Exit 4** — "Integrity MISMATCH" | The destination doesn't match what was migrated (a ref tip or the commit count differs). The report lists the exact refs; re-run, or inspect the destination for outside changes. |
+| `the destination should be an SSH URL` | The destination must be SSH (`git@github.com:USER/REPO.git`), which is leak-proof and hang-proof. Convert an HTTPS dest with [GitHub SSH setup](#requirements-github-ssh-access). |
+| GitHub SSH auth fails / wrong account | Run `vector-migrate --check`; it names every local key and where to register one. If multiple GitHub accounts share a host, pin the right key with `--ssh-key`. |
+| Branch case-conflict warning on macOS/Windows | Two branches whose names (or directory segments) differ only by case can't coexist on a case-insensitive filesystem; Vector resolves them automatically (rename/skip) — choose at the prompt or re-run on Linux/WSL. |
 
 ---
 
@@ -485,7 +566,7 @@ Vector ships with a rigorous, fully-offline test suite (Node's built-in runner �
 npm test
 ```
 
-It covers configuration parsing & validation, programmatic dependency checks (with human-readable errors), the pure push-decision logic, and a full incremental-sync integration test that runs the real pipeline against local stand-in repositories — asserting idempotency, deterministic SHAs, delta-only rewriting, and non-destructive pushes.
+It covers configuration parsing & validation, mode/URL resolution and the 0-commit fallback decision, the pure integrity comparison (ref set + tip OID + count), programmatic dependency checks (with human-readable errors), the pure push-decision logic, and full integration tests that run the **real pipeline** against local stand-in repositories — asserting idempotency, deterministic SHAs, delta-only rewriting, non-destructive pushes, verbatim Mode-B mirroring, the auto-fallback, sync determinism, the divergence stop (exit 5), and the integrity engine catching a tampered destination (exit 4).
 
 A pure-Bash implementation (`migrate.sh`, with `tests/run_tests.sh`) is also included for environments without Node.
 

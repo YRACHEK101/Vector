@@ -6,8 +6,12 @@
 // tested); the IO steps are integration-tested against local stand-in repos.
 // ─────────────────────────────────────────────────────────────────────────────
 import { existsSync, writeFileSync, rmSync, mkdirSync } from 'node:fs';
-import { run, query, status, gitDir } from './git.js';
-import { buildMailmap } from './config.js';
+import {
+  run, query, status, gitDir,
+  refTips, remoteRefTips, countReachable,
+} from './git.js';
+import { buildMailmap, decideRewriteStrategy, EXIT, VectorError } from './config.js';
+import { compareIntegrity, formatIntegrityReport } from './integrity.js';
 import {
   parseBranchRefs, resolveBranches, parseIdentities, parseMailmap,
   detectBranchConflicts, planConflictResolution,
@@ -37,6 +41,7 @@ export function decidePushStrategy({ localSha, remoteSha, isAncestor }) {
 
 /** Step 1 — keep a pristine source mirror, fetching new commits into it (never rewriting it). */
 export async function syncSourceMirror(cfg, ui = defaultUi) {
+  if (cfg.workDir) mkdirSync(cfg.workDir, { recursive: true });
   if (existsSync(cfg.sourceMirror)) {
     const sp = ui.spinner('Fetching new commits from Azure into existing mirror').start();
     await run('git', [...gitDir(cfg.sourceMirror), 'remote', 'set-url', 'origin', cfg.azureUrl], { env: cfg.gitEnv }).catch(noop);
@@ -71,6 +76,7 @@ export function enableCaseSensitivity(dir, { platform = process.platform, runner
 
 /** Step 2 — rebuild a fully-isolated rewrite copy from the source (deterministic SHAs). */
 export async function buildStaging(cfg, ui = defaultUi, deps = {}) {
+  if (cfg.workDir) mkdirSync(cfg.workDir, { recursive: true });
   rmSync(cfg.stagingMirror, { recursive: true, force: true });
   // On Windows, make the staging repo's ref storage case-sensitive BEFORE the
   // clone writes any ref, so case-only branch collisions never materialize.
@@ -270,6 +276,68 @@ export function listBranches(cfg, dir = cfg.stagingMirror) {
   return parseBranchRefs(out);
 }
 
+/** Enumerate the tags present in the staging mirror (short names). */
+export function listTags(cfg, dir = cfg.stagingMirror) {
+  const out = query('git', [...gitDir(dir), 'for-each-ref', '--format=%(refname:short)', 'refs/tags/']) || '';
+  return parseBranchRefs(out);
+}
+
+/**
+ * Push one tag. New tags are created; a tag whose object changed (e.g. a rewrite
+ * moved it) is updated with a precise --force-with-lease (never a bare --force),
+ * so we only overwrite the exact remote value we observed.
+ */
+export async function pushTag(cfg, tag, ui = defaultUi) {
+  const gd = gitDir(cfg.stagingMirror);
+  const localSha = query('git', [...gd, 'rev-parse', `refs/tags/${tag}`]);
+  if (!localSha) return { tag, strategy: 'missing-local' };
+  const ls = query('git', [...gd, 'ls-remote', cfg.githubSsh, `refs/tags/${tag}`], { env: cfg.gitEnv });
+  const remoteSha = ls ? ls.split(/\s+/)[0] : '';
+  const refspec = `refs/tags/${tag}:refs/tags/${tag}`;
+  if (remoteSha === localSha) return { tag, strategy: 'noop', localSha, remoteSha };
+  if (cfg.dryRun) {
+    ui.info(`  [tag ${tag}] would ${remoteSha ? 'update' : 'create'} (dry-run — no push).`);
+    return { tag, strategy: remoteSha ? 'update' : 'create', planned: true, localSha, remoteSha };
+  }
+  if (!remoteSha) {
+    await run('git', [...gd, 'push', cfg.githubSsh, refspec], { env: cfg.gitEnv });
+    ui.ok(`  [tag ${tag}] created on the destination.`);
+    return { tag, strategy: 'create', localSha, remoteSha };
+  }
+  await run('git', [...gd, 'push', `--force-with-lease=refs/tags/${tag}:${remoteSha}`, cfg.githubSsh, refspec], { env: cfg.gitEnv });
+  ui.warn(`  [tag ${tag}] updated on the destination (its object changed — likely the identity rewrite).`);
+  return { tag, strategy: 'update', localSha, remoteSha };
+}
+
+/**
+ * Post-push integrity verdict: compare the migrated staging mirror (A) against the
+ * destination remote (B) over the refs we actually synced — every branch we pushed
+ * or that was already in sync, plus every tag we pushed. Branches deliberately left
+ * untouched (remote-ahead / diverged-and-skipped) are excluded, since the remote
+ * legitimately differs there. Verifies ref set, tip OIDs, and reachable count.
+ */
+export function verifyIntegrity(cfg, { pushes = [], tagPushes = [] } = {}) {
+  const sTips = refTips(cfg.stagingMirror);
+  const rTips = remoteRefTips(cfg.githubSsh, { env: cfg.gitEnv });
+  const synced = new Set();
+  for (const p of pushes) {
+    if (p.strategy === 'create' || p.strategy === 'noop' || p.strategy === 'fast-forward'
+      || (p.strategy === 'diverged' && p.forced)) synced.add(`refs/heads/${p.branch}`);
+  }
+  for (const t of tagPushes) {
+    if (t.strategy === 'create' || t.strategy === 'noop' || t.strategy === 'update') synced.add(`refs/tags/${t.tag}`);
+  }
+  const aRefs = {};
+  const bRefs = {};
+  for (const ref of synced) {
+    if (sTips[ref]) aRefs[ref] = sTips[ref];
+    if (rTips[ref]) bRefs[ref] = rTips[ref];
+  }
+  const aCount = countReachable(cfg.stagingMirror, Object.values(aRefs));
+  const bCount = countReachable(cfg.stagingMirror, Object.values(bRefs));
+  return compareIntegrity({ aRefs, bRefs, aCount, bCount, aLabel: 'staging', bLabel: 'destination' });
+}
+
 /** Enumerate the unique author identities across all refs of a mirror (defaults to source). */
 export function listAuthors(cfg, dir = cfg.sourceMirror) {
   const out = query('git', [...gitDir(dir), 'log', '--all', '--pretty=format:%aN|%aE']) || '';
@@ -294,6 +362,24 @@ export async function pushBranch(cfg, branch, ui = defaultUi) {
   }
   const isAncestor = (a, b) => status('git', [...gd, 'merge-base', '--is-ancestor', a, b]) === 0;
   const strategy = decidePushStrategy({ localSha, remoteSha, isAncestor });
+
+  // --dry-run: report the plan, write nothing to the remote.
+  if (cfg.dryRun) {
+    ui.info(`  [${branch}] would ${strategy} (dry-run — no push).`);
+    return { branch, strategy, planned: true, localSha, remoteSha };
+  }
+
+  // On --sync, a TRUE divergence (unrelated histories) must stop for a human
+  // decision rather than be silently skipped or force-clobbered.
+  if (strategy === 'diverged' && cfg.sync && !cfg.force && !cfg.forceExisting) {
+    throw new VectorError(
+      `Branch "${branch}" has DIVERGED from the destination — the remote tip (${remoteSha.slice(0, 10)}) ` +
+      `is not an ancestor of the rewritten tip (${localSha.slice(0, 10)}), so a sync cannot fast-forward it.\n` +
+      `  Inspect the destination, then re-run with --force-existing to apply the new history (its commit SHAs will change), ` +
+      `or migrate fewer branches with --branch to exclude it.`,
+      EXIT.DIVERGENCE,
+    );
+  }
 
   const doPush = (force = false) =>
     run('git', [...gd, 'push', ...(force ? ['--force'] : []), cfg.githubSsh, `refs/heads/${branch}:refs/heads/${branch}`], { env: cfg.gitEnv });
@@ -459,7 +545,7 @@ export async function ensureSshReady(cfg, ui = defaultUi, deps = {}) {
   return { ok: true, needGithub, needAzure };
 }
 
-/** Full pipeline: idempotent, incremental, non-destructive. */
+/** Full pipeline: idempotent, incremental, non-destructive, mode-routed, integrity-checked. */
 export async function migrate(cfg, ui = defaultUi) {
   await ensureGithubSsh(cfg, ui); // stop early if SSH isn't set up — never push-fail late
   const sync = await syncSourceMirror(cfg, ui);
@@ -467,7 +553,25 @@ export async function migrate(cfg, ui = defaultUi) {
   // Resolve case-insensitive / directory-file branch conflicts before the rewrite,
   // so git-filter-repo can't crash with "cannot lock ref" on Windows/macOS.
   const conflicts = await resolveBranchConflicts(cfg, ui);
-  const rewrite = await rewriteHistory(cfg, ui);
+
+  // Strategy: 'rewrite' rewrites identities; 'mirror' copies verbatim. A rewrite
+  // whose mapping matches 0 commits auto-falls-back to mirror (Section 2 / spec) —
+  // rewriting nothing would only churn SHAs for no benefit.
+  const entries = parseMailmap(cfg.mailmapText || '');
+  let decision = { strategy: cfg.baseStrategy || 'rewrite', fallback: false };
+  if ((cfg.baseStrategy || 'rewrite') === 'rewrite') {
+    const applicable = entries.length > 0 && mappingsApplicable(historyIdentities(cfg), entries);
+    decision = decideRewriteStrategy({ baseStrategy: 'rewrite', applicableCommits: applicable ? 1 : 0 });
+    if (decision.fallback) ui.warn(`Auto-fallback to mirror — ${decision.reason}`);
+  }
+
+  let rewrite = { rewritten: false, strategy: decision.strategy };
+  if (decision.strategy === 'rewrite') {
+    rewrite = { ...(await rewriteHistory(cfg, ui)), strategy: 'rewrite' };
+  } else {
+    ui.ok('Mirror strategy — copying history verbatim (no identity rewrite).');
+  }
+
   // Resolve the branch set after the mirror exists. Default = every branch;
   // an explicit --branch list narrows it; --all-branches forces all.
   const branches = resolveBranches({
@@ -477,5 +581,34 @@ export async function migrate(cfg, ui = defaultUi) {
   });
   const pushes = [];
   for (const branch of branches) pushes.push(await pushBranch(cfg, branch, ui));
-  return { mode: sync.mode, rewrite, conflicts, caseSensitive: staging.caseSensitive, branches, pushes, verification: verify(cfg, branches) };
+
+  // Tags ride along when migrating the whole repo; a narrowed --branch run skips
+  // them (a tag could point at history we deliberately excluded).
+  const tags = cfg.branchesExplicit ? [] : listTags(cfg);
+  const tagPushes = [];
+  for (const tag of tags) tagPushes.push(await pushTag(cfg, tag, ui));
+
+  // Integrity gate: verify what we synced is intact on the destination. Skipped on
+  // --dry-run (which wrote nothing). Any mismatch aborts with a precise report.
+  let integrity = null;
+  if (!cfg.dryRun) {
+    integrity = verifyIntegrity(cfg, { pushes, tagPushes });
+    if (integrity.ok) ui.ok(formatIntegrityReport(integrity));
+    else throw new VectorError(`${formatIntegrityReport(integrity)}\nAborting — destination does not match the migrated history.`, EXIT.INTEGRITY);
+  }
+
+  return {
+    mode: sync.mode,
+    strategy: decision.strategy,
+    fallback: decision.fallback ? decision.reason : null,
+    rewrite,
+    conflicts,
+    caseSensitive: staging.caseSensitive,
+    branches,
+    pushes,
+    tags,
+    tagPushes,
+    integrity,
+    verification: verify(cfg, branches),
+  };
 }

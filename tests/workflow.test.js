@@ -90,11 +90,18 @@ test('resolveBranches: default is ALL; --branch narrows; --all-branches & combos
 });
 
 // ── 3a.7 — Config validation (interactive vs non-interactive; legacy regression) ──
-test('validateRun: non-interactive needs a complete mapping; interactive does not', () => {
-  const base = finalizeConfig({ azureUrl: 'https://a', githubSsh: 'git@github.com:o/r.git' });
-  assert.equal(validateRun(base, { interactive: false }).ok, false, 'no mapping → fails in non-interactive');
+test('validateRun: a rewrite run with no prompt needs a complete mapping; interactive does not', () => {
+  const base = finalizeConfig({ mode: 'a', azureUrl: 'https://a', githubSsh: 'git@github.com:o/r.git' });
+  assert.equal(base.baseStrategy, 'rewrite');
+  assert.equal(validateRun(base, { interactive: false }).ok, false, 'rewrite + no mapping → fails in non-interactive');
   assert.ok(validateRun(base, { interactive: false }).errors.some((e) => /complete identity mapping/.test(e)));
   assert.equal(validateRun(base, { interactive: true }).ok, true, 'interactive can build the mapping later');
+});
+
+test('validateRun: mirror mode (no mapping) is valid non-interactively', () => {
+  const mirror = finalizeConfig({ mode: 'b', azureUrl: 'https://a', githubSsh: 'git@github.com:o/r.git' });
+  assert.equal(mirror.baseStrategy, 'mirror');
+  assert.equal(validateRun(mirror, { interactive: false }).ok, true, 'a verbatim mirror needs no identity mapping');
 });
 
 test('validateRun: legacy --old-email/--new-* trio still validates (regression)', () => {

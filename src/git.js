@@ -59,3 +59,57 @@ export function status(cmd, args, opts = {}) {
 export function gitDir(dir) {
   return ['-c', 'safe.bareRepository=all', `--git-dir=${dir}`];
 }
+
+// ── Ref / OID / count helpers (used by the integrity engine and 0-commit fallback) ──
+
+/** Map of every local branch + tag → its stored tip OID, in a bare mirror. */
+export function refTips(dir) {
+  const out = query('git', [...gitDir(dir), 'for-each-ref', '--format=%(refname) %(objectname)', 'refs/heads/', 'refs/tags/']) || '';
+  const map = {};
+  for (const line of out.split('\n')) {
+    const [ref, oid] = line.trim().split(/\s+/);
+    if (ref && oid) map[ref] = oid;
+  }
+  return map;
+}
+
+/** Map of a remote's branch + tag refs → tip OID via ls-remote (peeled "^{}" lines dropped). */
+export function remoteRefTips(remote, { env } = {}) {
+  const out = query('git', ['ls-remote', '--heads', '--tags', remote], { env }) || '';
+  const map = {};
+  for (const line of out.split('\n')) {
+    const m = line.trim().match(/^([0-9a-fA-F]+)\s+(\S+)$/);
+    if (!m) continue;
+    const [, oid, ref] = m;
+    if (ref.endsWith('^{}')) continue; // peeled annotated-tag entry — keep the tag object oid only
+    map[ref] = oid;
+  }
+  return map;
+}
+
+/** Total commit count across all refs (`git rev-list --count --all`); null if it fails. */
+export function countAll(dir) {
+  const n = query('git', [...gitDir(dir), 'rev-list', '--count', '--all']);
+  return n == null ? null : (parseInt(n, 10) || 0);
+}
+
+/** Count of unique commits reachable from the given OIDs (objects must exist in `dir`). */
+export function countReachable(dir, oids = []) {
+  const list = [...new Set((oids || []).filter(Boolean))];
+  if (!list.length) return 0;
+  const n = query('git', [...gitDir(dir), 'rev-list', '--count', ...list]);
+  return n == null ? null : (parseInt(n, 10) || 0);
+}
+
+/** Number of commits whose author OR committer email matches (case-insensitive), across all refs. */
+export function commitsByEmail(dir, email) {
+  const e = String(email ?? '').trim().toLowerCase();
+  if (!e) return 0;
+  const out = query('git', [...gitDir(dir), 'log', '--all', '--format=%ae%x09%ce']) || '';
+  let count = 0;
+  for (const line of out.split('\n')) {
+    const [ae, ce] = line.split('\t');
+    if ((ae && ae.toLowerCase() === e) || (ce && ce.toLowerCase() === e)) count += 1;
+  }
+  return count;
+}

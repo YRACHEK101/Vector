@@ -3,9 +3,42 @@
 // Everything here is unit-tested.
 // ─────────────────────────────────────────────────────────────────────────────
 import { resolveMailmapEntries, buildLegacyEntries } from './team.js';
+import { resolveMode, strategyForMode, detectHostKind, normalizeGitHubUrl } from './modes.js';
 
 export const DEFAULT_BRANCHES = ['master', 'main'];
 export const REQUIRED = ['azureUrl', 'githubSsh', 'oldEmail', 'newName', 'newEmail'];
+
+/**
+ * Process exit codes — documented in the README so scripts can branch on them.
+ *   0 success · 2 bad input/usage · 3 git/subprocess failure ·
+ *   4 integrity mismatch · 5 ancestry divergence needing a human decision.
+ */
+export const EXIT = { OK: 0, USAGE: 2, GIT: 3, INTEGRITY: 4, DIVERGENCE: 5 };
+
+/** An error that carries the process exit code the CLI should surface for it. */
+export class VectorError extends Error {
+  constructor(message, exitCode = EXIT.GIT) {
+    super(message);
+    this.name = 'VectorError';
+    this.exitCode = exitCode;
+  }
+}
+
+/**
+ * Pure: the effective execution strategy after the 0-commit auto-fallback.
+ * A rewrite with nothing to rewrite (the old identities match no commits) would
+ * only churn SHAs for no benefit, so it downgrades to a verbatim mirror.
+ * @returns {{strategy:'rewrite'|'mirror', fallback:boolean, reason?:string}}
+ */
+export function decideRewriteStrategy({ baseStrategy = 'rewrite', applicableCommits = 0 } = {}) {
+  if (baseStrategy !== 'rewrite') return { strategy: 'mirror', fallback: false };
+  if (Number(applicableCommits) > 0) return { strategy: 'rewrite', fallback: false };
+  return {
+    strategy: 'mirror',
+    fallback: true,
+    reason: 'the identity mapping matched 0 commits in the source history — mirroring verbatim instead of rewriting (which would only change SHAs for no benefit).',
+  };
+}
 
 /** Interpret an env flag as boolean: "1"/"true"/"yes"/"on" → true; "0"/""/unset → false. */
 export function parseBool(v) {
@@ -61,6 +94,13 @@ export function configFromEnv(env = process.env) {
     newEmail: env.NEW_EMAIL || '',
     azureUrl: env.AZURE_URL || '',
     githubSsh: env.GITHUB_SSH || '',
+    // New surface: --source/--dest aliases, mode, sync, work dir, json output.
+    source: env.SOURCE || '',
+    dest: env.DEST || '',
+    mode: env.MODE || '',
+    sync: parseBool(env.SYNC),
+    json: parseBool(env.JSON),
+    workDir: env.WORK_DIR || '',
     branches: env.PUSH_BRANCHES ? parseBranches(env.PUSH_BRANCHES) : [],
     sshKey: env.SSH_KEY || '',
     force: false,
@@ -108,15 +148,18 @@ export function validateConfig(cfg) {
 export function validateRun(final, { interactive = false } = {}) {
   const errors = [];
   const empty = (v) => v == null || String(v).trim() === '';
-  if (empty(final.azureUrl)) errors.push('Missing Azure source URL (--azure-url / AZURE_URL).');
-  if (empty(final.githubSsh)) errors.push('Missing GitHub destination (--github-ssh / GITHUB_SSH).');
+  if (empty(final.azureUrl)) errors.push('Missing source URL (--source / --azure-url / AZURE_URL).');
+  if (empty(final.githubSsh)) errors.push('Missing GitHub destination (--dest / --github-ssh / GITHUB_SSH).');
   else if (!/^(git@|ssh:\/\/)/.test(final.githubSsh)) {
-    errors.push('githubSsh should be an SSH URL, e.g. git@github.com:USER/REPO.git');
+    errors.push('the destination should be an SSH URL, e.g. git@github.com:USER/REPO.git');
   }
-  if (!interactive) {
+  // Mirror mode (B, or a rewrite mode that will auto-fallback) needs no mapping; only
+  // rewrite modes require a complete mapping up front when there is no prompt available.
+  const rewriteMode = final.baseStrategy ? final.baseStrategy === 'rewrite' : final.mode !== 'b';
+  if (!interactive && rewriteMode) {
     const hasMapping = !!(final.mailmapText && final.mailmapText.trim());
     if (!hasMapping) {
-      errors.push('Non-interactive mode needs a complete identity mapping: provide --mailmap, --map, or --old-email with --new-name/--new-email.');
+      errors.push('A rewrite run with no prompt needs a complete identity mapping: provide --mailmap, --map, or --old-email with --new-name/--new-email (or use --mode b for a verbatim mirror).');
     }
   }
   return { ok: errors.length === 0, errors };
@@ -128,7 +171,11 @@ export function validateRun(final, { interactive = false } = {}) {
  * git transport environment.
  */
 export function finalizeConfig(cfg, { cwd = process.cwd() } = {}) {
-  const project = cfg.project || deriveProjectSlug(cfg.githubSsh) || 'repo';
+  // --source/--dest are the documented aliases for the source URL and the GitHub
+  // destination; the legacy --azure-url/--github-ssh names still work.
+  const azureUrl = cfg.azureUrl || cfg.source || '';
+  const githubSsh = cfg.githubSsh || cfg.dest || '';
+  const project = cfg.project || deriveProjectSlug(githubSsh) || 'repo';
   const allOldEmails = parseEmails([cfg.oldEmail, ...(cfg.extraOldEmails || [])]);
   const sshKey = cfg.sshKey || '';
   // accept-new trusts a never-before-seen host key on first contact without a
@@ -159,9 +206,34 @@ export function finalizeConfig(cfg, { cwd = process.cwd() } = {}) {
     legacyEntries,
   });
 
+  // Routing: resolve the mode (explicit --mode wins, else inferred from the source
+  // host + whether a mapping exists) and the base strategy it implies. The runtime
+  // 0-commit fallback (decideRewriteStrategy) may still downgrade rewrite→mirror.
+  const hasRewrite = !!(resolved.text && resolved.text.trim());
+  const mode = resolveMode({ mode: cfg.mode, source: azureUrl, hasRewrite });
+  const baseStrategy = strategyForMode(mode);
+  const sourceKind = detectHostKind(azureUrl);
+  // Mode C accepts an HTTPS or SSH GitHub source — normalize to SSH for a consistent
+  // auth/push path; non-GitHub sources pass through unchanged.
+  const normalizedSource = sourceKind === 'github' ? normalizeGitHubUrl(azureUrl, 'ssh') : azureUrl;
+
+  // Staging lives under a single work dir (default ./.vector-staging) so the host
+  // stays tidy and a sync can reuse the same deterministic layout.
+  const workDir = cfg.workDir || `${cwd}/.vector-staging`;
+
   return {
     ...cfg,
+    azureUrl: normalizedSource,
+    githubSsh,
     project,
+    mode,
+    baseStrategy,
+    sourceKind,
+    sync: !!cfg.sync,
+    dryRun: !!cfg.dryRun,
+    json: !!cfg.json,
+    verbose: !!cfg.verbose,
+    workDir,
     branches,
     branchesExplicit,
     allOldEmails,
@@ -173,8 +245,8 @@ export function finalizeConfig(cfg, { cwd = process.cwd() } = {}) {
     rewriteEmails: resolved.rewriteEmails,
     hasNameOnlyMapping: resolved.hasNameOnly,
     gitEnv,
-    sourceMirror: `${cwd}/${project}-source.git`,
-    stagingMirror: `${cwd}/${project}-migration.git`,
-    mailmapFile: `${cwd}/${project}-mailmap.txt`,
+    sourceMirror: `${workDir}/${project}-source.git`,
+    stagingMirror: `${workDir}/${project}-migration.git`,
+    mailmapFile: `${workDir}/${project}-mailmap.txt`,
   };
 }
