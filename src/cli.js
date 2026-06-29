@@ -9,6 +9,7 @@ import { ui, c } from './ui.js';
 import { createLogger } from './logger.js';
 import {
   configFromEnv, mergeConfigs, finalizeConfig, validateRun, parseBranches, parseEmails,
+  validateMaxFileSize, validateOnLargeFile,
   EXIT, VectorError,
 } from './config.js';
 import { MODES } from './modes.js';
@@ -67,6 +68,12 @@ ${c.bold('BRANCHES & SAFETY')}
   --force-existing                              Apply new identities to branches ALREADY on the destination
                                                 (force-update — commit SHAs change for those branches)
 
+${c.bold('LARGE FILES')} (GitHub rejects any file > 100 MB anywhere in history)
+  --max-file-size <MB>       MAX_FILE_SIZE      Size threshold in MB (default 100, GitHub's limit)
+  --on-large-file <action>   ON_LARGE_FILE      strip | lfs | abort | prompt
+                                                Interactive default: prompt · non-interactive/--force: strip
+                                                strip = remove from ALL history · lfs = move to Git LFS · abort = stop
+
 ${c.bold('GENERAL')}
   --project <slug>           PROJECT            Local folder slug (auto-derived)
   --work-dir <path>          WORK_DIR           Staging directory (default ./.vector-staging)
@@ -89,6 +96,7 @@ const VALUE_FLAGS = {
   '--mailmap': 'mailmapPath',
   // New surface
   '--mode': 'mode', '--source': 'source', '--dest': 'dest', '--work-dir': 'workDir',
+  '--max-file-size': 'maxFileSize', '--on-large-file': 'onLargeFile',
 };
 
 export function parseArgs(argv) {
@@ -140,7 +148,11 @@ function assembleConfig(opts) {
   if (opts.json) ov.json = true;
   if (opts.verbose) ov.verbose = true;
   if (opts.mapList.length) ov.maps = opts.mapList;
-  return mergeConfigs(env, ov);
+  const merged = mergeConfigs(env, ov);
+  // Strict, fail-fast validation of the large-file flags (clean usage errors).
+  validateMaxFileSize(merged.maxFileSize);
+  validateOnLargeFile(merged.onLargeFile);
+  return merged;
 }
 
 function printPrereqs(pre) {
@@ -338,8 +350,13 @@ export async function run(argv) {
   // Interactive runs get to choose how branch-name conflicts are resolved;
   // non-interactive runs default to the safe, data-preserving choice (rename).
   if (opts.interactive) {
-    const { chooseConflictResolution } = await import('./wizard.js');
+    const { chooseConflictResolution, chooseLargeFileAction } = await import('./wizard.js');
     final._resolveConflicts = (conflicts) => chooseConflictResolution(conflicts);
+    // Prompt how to handle oversized files only on a genuinely interactive run;
+    // --force and -y mean "just proceed", so they take the strip default instead.
+    if (!opts.force && !opts.assumeYes) {
+      final._chooseLargeFileAction = (offenders, o) => chooseLargeFileAction(offenders, o);
+    }
   }
 
   // ── mirror (idempotent) → [rewrite] → ancestry-aware push → integrity verify ──

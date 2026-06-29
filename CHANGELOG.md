@@ -4,6 +4,24 @@ All notable changes to `vector-migrate` are documented here. This project follow
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.5.0] - 2026-06-29
+
+### Added
+
+- **Automatic handling of GitHub's 100 MB file-size limit.** GitHub hard-rejects any single file larger than 100 MB found *anywhere* in history — and it does so at the very last step (the push), after the expensive mirror + identity rewrite are already done. Vector now catches this **before** the push:
+  - **Pre-flight scan.** Once the staging copy is built (and before any `git push`), Vector streams the full object graph (`git rev-list --objects --all | git cat-file --batch-check` — nothing is checked out) and reports every offender with its path and human-readable size, e.g. `Found 1 file exceeding GitHub's 100 MB limit: Cursor-1.0.0-x86_64.AppImage (182.19 MB)`.
+  - **`--max-file-size <MB>`** — the threshold (**default 100**, GitHub's limit). The byte threshold is derived from this single value (MiB-based, matching GitHub's display and `git-filter-repo`).
+  - **`--on-large-file <strip|lfs|abort|prompt>`** — what to do with offenders. **Interactive** runs default to `prompt`; **non-interactive / `--force` / CI** runs default to **`strip`** with a loud warning, so a `--force` migration "just fixes it and pushes" with no manual steps. `abort` preserves the old fail-fast behaviour.
+  - **`strip`** removes the offending blobs from *all* history via `git-filter-repo --strip-blobs-bigger-than`. When an identity rewrite is also running, the strip is **folded into the same filter-repo pass** (one rewrite, not two); in mirror mode it runs as a single targeted pass.
+  - **`lfs`** moves the oversized paths to **Git LFS** (`git lfs migrate import`). If `git-lfs` isn't installed, Vector prints install steps and falls back to `strip` (auto/`--force`) or aborts (interactive).
+  - **`GH001` fallback (belt & suspenders).** If a push is *still* rejected for size, Vector translates the raw `git push exited with code 1` into a plain-language message naming the remediation flags, instead of surfacing the bare exit code.
+  - **Honest logging.** Whenever history is rewritten to remove/move files, Vector warns that those files are gone from the pushed history, that commit SHAs changed, and that existing clones must be re-cloned — and suggests a matching `.gitignore` line (e.g. `*.AppImage`) so the binary doesn't return on the next migration.
+
+### Notes
+
+- A repo with **no** oversized files is unaffected — the scan is fast and silent, with no new prompts and no behaviour change.
+- Stripping/LFS-migrating **rewrites history, so commit SHAs change** by design. Re-running the migration from the Azure source re-introduces the blob (it still lives in Azure's history), so the fix lives in the rewrite/push stage and is re-applied on every run.
+
 ## [2.4.0] - 2026-06-26
 
 ### Added

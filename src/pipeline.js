@@ -10,8 +10,12 @@ import {
   run, query, status, gitDir,
   refTips, remoteRefTips, countReachable,
 } from './git.js';
-import { buildMailmap, decideRewriteStrategy, EXIT, VectorError } from './config.js';
+import { buildMailmap, decideRewriteStrategy, DEFAULT_MAX_FILE_MB, EXIT, VectorError } from './config.js';
 import { compareIntegrity, formatIntegrityReport } from './integrity.js';
+import {
+  scanLargeBlobs, mbToBytes, formatBytes, formatOffenders, defaultLargeFileAction,
+  gitLfsAvailable, suggestGitignore, parseGH001, formatGH001Guidance, LFS_INSTALL_HELP,
+} from './largefiles.js';
 import {
   parseBranchRefs, resolveBranches, parseIdentities, parseMailmap,
   detectBranchConflicts, planConflictResolution,
@@ -229,7 +233,11 @@ export function validateMappings(ids, entries) {
  * personal (single identity) and team (multi-developer mailmap). Skips only when we
  * can prove there's nothing to do; the rewrite itself is deterministic either way.
  */
-export async function rewriteHistory(cfg, ui = defaultUi) {
+export async function rewriteHistory(cfg, ui = defaultUi, opts = {}) {
+  // When set, fold an oversized-blob strip into THIS same git-filter-repo pass
+  // (one rewrite, not two). Only reached when there are real mappings to apply —
+  // migrate() guarantees that before passing a strip threshold here.
+  const stripMb = opts.stripBlobsBiggerThanMB || null;
   const text = cfg.mailmapText ?? buildMailmap(cfg.newName, cfg.newEmail, cfg.allOldEmails);
   writeFileSync(cfg.mailmapFile, text);
   if (!text.trim()) {
@@ -243,9 +251,14 @@ export async function rewriteHistory(cfg, ui = defaultUi) {
     ui.ok('No matching identities in history — nothing to remap, skipping.');
     return { rewritten: false };
   }
-  const sp = ui.spinner('Rewriting author/committer identities via git-filter-repo').start();
+  const sp = ui.spinner(stripMb
+    ? 'Rewriting identities and stripping oversized files via git-filter-repo'
+    : 'Rewriting author/committer identities via git-filter-repo').start();
   try {
-    await run('git', [...gitDir(cfg.stagingMirror), 'filter-repo', '--mailmap', cfg.mailmapFile, '--force'], { env: cfg.gitEnv });
+    const args = [...gitDir(cfg.stagingMirror), 'filter-repo', '--mailmap', cfg.mailmapFile];
+    if (stripMb) args.push('--strip-blobs-bigger-than', `${stripMb}M`);
+    args.push('--force');
+    await run('git', args, { env: cfg.gitEnv });
   } catch (e) {
     sp.fail('History rewrite failed');
     const detail = `${e.message || ''}\n${e.stderr || ''}`;
@@ -260,14 +273,131 @@ export async function rewriteHistory(cfg, ui = defaultUi) {
     }
     throw e;
   }
-  sp.succeed('History rewritten');
+  sp.succeed(stripMb ? 'History rewritten (identities remapped, oversized files stripped)' : 'History rewritten');
   // Per-mapping safety check: validate exactly what each mapping intended to change.
   // A name-only remap keeps its email on purpose, so we do NOT require it to vanish.
   const errors = validateMappings(historyIdentities(cfg), entries);
   if (errors.length) {
     throw new Error(`Safety check failed after the rewrite:\n  - ${errors.join('\n  - ')}\nAborting before push.`);
   }
-  return { rewritten: true };
+  return { rewritten: true, stripped: !!stripMb };
+}
+
+/** Is git-lfs usable? Honors an injected cfg._lfsAvailable (tests), else probes. */
+function lfsOk(cfg) {
+  return typeof cfg._lfsAvailable === 'boolean' ? cfg._lfsAvailable : gitLfsAvailable();
+}
+
+/** Run a targeted git-filter-repo pass that strips every blob bigger than `mb` MiB. */
+export async function stripLargeBlobs(cfg, mb) {
+  await run('git', [...gitDir(cfg.stagingMirror), 'filter-repo', '--strip-blobs-bigger-than', `${mb}M`, '--force'], { env: cfg.gitEnv });
+}
+
+/** Move every blob bigger than `mb` MiB into Git LFS (rewrites history to pointers). */
+export async function lfsMigrateImport(cfg, mb) {
+  // `git lfs migrate` runs against the repo selected by -C; our staging is a bare
+  // mirror, so we must also trust it (safe.bareRepository=all) — which propagates
+  // to the child git processes git-lfs spawns via GIT_CONFIG_PARAMETERS.
+  await run('git', ['-c', 'safe.bareRepository=all', '-C', cfg.stagingMirror, 'lfs', 'migrate', 'import', `--above=${mb}MiB`, '--everything'], { env: cfg.gitEnv });
+}
+
+/**
+ * Pre-flight (Step 2.7): scan the staging history for blobs over the size limit,
+ * REPORT each offender (path + human size) before any push, and decide how to
+ * remediate. Runs before the rewrite so a strip can ride along in the same
+ * git-filter-repo pass. Throws (exit 3) when the chosen action is `abort`.
+ * @returns {Promise<{offenders:Array,action:string,limitMb:number,limitBytes:number}>}
+ */
+export async function planLargeFileRemediation(cfg, ui = defaultUi) {
+  const limitMb = cfg.maxFileSizeMb || DEFAULT_MAX_FILE_MB;
+  const limitBytes = mbToBytes(limitMb);
+  if (cfg.skipLargeFileScan) return { offenders: [], action: 'none', limitMb, limitBytes };
+
+  const sp = ui.spinner(`Scanning history for files larger than ${limitMb} MB`).start();
+  let offenders = [];
+  try { offenders = await scanLargeBlobs(cfg.stagingMirror, limitBytes, { env: cfg.gitEnv }); } catch { offenders = []; }
+  if (!offenders.length) {
+    sp.succeed(`No files exceed the ${limitMb} MB limit.`);
+    return { offenders: [], action: 'none', limitMb, limitBytes };
+  }
+  sp.stop();
+  ui.warn(formatOffenders(offenders, limitMb));
+
+  // Resolve the action: explicit flag wins; otherwise prompt (interactive) or
+  // default to strip (non-interactive / --force / CI — "just fix it and push").
+  let action = defaultLargeFileAction({ requested: cfg.onLargeFile, hasPrompter: !!cfg._chooseLargeFileAction });
+  if (action === 'prompt') action = await cfg._chooseLargeFileAction(offenders, { lfsAvailable: lfsOk(cfg) });
+
+  if (action === 'abort') {
+    throw new VectorError(
+      `Aborting: ${offenders.length} file(s) exceed GitHub's ${limitMb} MB limit:\n`
+      + offenders.map((o) => `  • ${o.path} (${formatBytes(o.size)})`).join('\n') + '\n'
+      + 'Re-run with --on-large-file strip to remove them from history (default with --force), '
+      + '--on-large-file lfs to move them to Git LFS, or raise --max-file-size.',
+      EXIT.GIT,
+    );
+  }
+  // Loud warning when an auto-default (no flag, no prompt) silently rewrites history.
+  if (!cfg.onLargeFile && !cfg._chooseLargeFileAction) {
+    ui.warn(`No prompt available (non-interactive/--force) — defaulting to "${action}", which rewrites history. `
+      + 'Use --on-large-file abort to stop instead, or --on-large-file lfs to keep them in Git LFS.');
+  }
+  return { offenders, action, limitMb, limitBytes };
+}
+
+/**
+ * Apply the remediation chosen by planLargeFileRemediation. A `strip` already
+ * folded into the identity-rewrite pass needs no extra work here (folded=true);
+ * otherwise this runs the targeted strip / LFS pass. Always re-scans and logs
+ * honestly that history changed and clones must be refreshed.
+ */
+export async function applyLargeFileRemediation(cfg, ui = defaultUi, plan = {}, { folded = false } = {}) {
+  const { offenders = [], action = 'none', limitMb, limitBytes } = plan;
+  if (!offenders.length || action === 'none' || action === 'abort') return { remediated: false };
+
+  // Dry-run rewrites nothing (no push will follow) — just report the plan.
+  if (cfg.dryRun) {
+    ui.warn(`Dry-run — would ${action === 'lfs' ? 'move to Git LFS' : 'strip from history'}: ${offenders.map((o) => o.path).join(', ')}`);
+    return { remediated: false, planned: action };
+  }
+
+  let mode = action;
+  if (mode === 'lfs' && !lfsOk(cfg)) {
+    ui.warn('git-lfs is not installed — cannot move large files to Git LFS.');
+    for (const line of LFS_INSTALL_HELP.split('\n')) ui.warn(`  ${line}`);
+    // Sensible fallback: an auto/non-interactive run "just fixes it" by stripping;
+    // an interactive run that explicitly chose LFS stops so the user can decide.
+    if (cfg._chooseLargeFileAction && !cfg.force) {
+      throw new VectorError('Aborting: --on-large-file lfs needs git-lfs. Install it, or re-run with --on-large-file strip.', EXIT.GIT);
+    }
+    ui.warn('Falling back to stripping the file(s) from history.');
+    mode = 'strip';
+  }
+
+  if (mode === 'strip') {
+    if (folded) {
+      ui.ok('Oversized files stripped in the same git-filter-repo pass as the identity rewrite.');
+    } else {
+      const sp = ui.spinner(`Stripping ${offenders.length} oversized file(s) from all history via git-filter-repo`).start();
+      try { await stripLargeBlobs(cfg, limitMb); } catch (e) { sp.fail('Strip failed'); throw e; }
+      sp.succeed('Oversized files stripped from history');
+    }
+  } else { // lfs
+    const sp = ui.spinner('Moving oversized files to Git LFS via git lfs migrate').start();
+    try { await lfsMigrateImport(cfg, limitMb); } catch (e) { sp.fail('LFS migration failed'); throw e; }
+    sp.succeed('Oversized files moved to Git LFS');
+  }
+
+  // Honest logging: history changed, SHAs changed, clones must be refreshed.
+  let remaining = [];
+  try { remaining = await scanLargeBlobs(cfg.stagingMirror, limitBytes, { env: cfg.gitEnv }); } catch { remaining = []; }
+  ui.warn(`History was rewritten — ${offenders.length} oversized file(s) ${mode === 'lfs' ? 'moved to Git LFS' : 'removed from every commit'}:`);
+  for (const o of offenders) ui.warn(`  • ${o.path} (${formatBytes(o.size)})`);
+  ui.warn('  Commit SHAs changed. Anyone with an existing clone of the destination must re-clone.');
+  const ignores = suggestGitignore(offenders);
+  if (ignores.length) ui.info(`  Tip: add to .gitignore so these don't return on the next migration: ${ignores.join(', ')}`);
+  if (remaining.length) ui.warn(`  ${remaining.length} file(s) still exceed the ${limitMb} MB limit after remediation.`);
+  return { remediated: true, mode, removed: offenders, remaining };
 }
 
 /** Enumerate the branches present in a mirror (defaults to the staging mirror). */
@@ -300,11 +430,11 @@ export async function pushTag(cfg, tag, ui = defaultUi) {
     return { tag, strategy: remoteSha ? 'update' : 'create', planned: true, localSha, remoteSha };
   }
   if (!remoteSha) {
-    await run('git', [...gd, 'push', cfg.githubSsh, refspec], { env: cfg.gitEnv });
+    await run('git', [...gd, 'push', cfg.githubSsh, refspec], { env: cfg.gitEnv, capture: true, tee: true });
     ui.ok(`  [tag ${tag}] created on the destination.`);
     return { tag, strategy: 'create', localSha, remoteSha };
   }
-  await run('git', [...gd, 'push', `--force-with-lease=refs/tags/${tag}:${remoteSha}`, cfg.githubSsh, refspec], { env: cfg.gitEnv });
+  await run('git', [...gd, 'push', `--force-with-lease=refs/tags/${tag}:${remoteSha}`, cfg.githubSsh, refspec], { env: cfg.gitEnv, capture: true, tee: true });
   ui.warn(`  [tag ${tag}] updated on the destination (its object changed — likely the identity rewrite).`);
   return { tag, strategy: 'update', localSha, remoteSha };
 }
@@ -382,7 +512,8 @@ export async function pushBranch(cfg, branch, ui = defaultUi) {
   }
 
   const doPush = (force = false) =>
-    run('git', [...gd, 'push', ...(force ? ['--force'] : []), cfg.githubSsh, `refs/heads/${branch}:refs/heads/${branch}`], { env: cfg.gitEnv });
+    run('git', [...gd, 'push', ...(force ? ['--force'] : []), cfg.githubSsh, `refs/heads/${branch}:refs/heads/${branch}`],
+      { env: cfg.gitEnv, capture: true, tee: true }); // tee: live progress + captured stderr (GH001 detection)
 
   let forced = false;
   switch (strategy) {
@@ -554,6 +685,11 @@ export async function migrate(cfg, ui = defaultUi) {
   // so git-filter-repo can't crash with "cannot lock ref" on Windows/macOS.
   const conflicts = await resolveBranchConflicts(cfg, ui);
 
+  // Pre-flight: detect blobs over GitHub's per-file limit and decide how to handle
+  // them BEFORE any push, so we never fail at the very last step. Runs before the
+  // rewrite so a strip can ride along inside the same git-filter-repo pass.
+  const largeFiles = await planLargeFileRemediation(cfg, ui);
+
   // Strategy: 'rewrite' rewrites identities; 'mirror' copies verbatim. A rewrite
   // whose mapping matches 0 commits auto-falls-back to mirror (Section 2 / spec) —
   // rewriting nothing would only churn SHAs for no benefit.
@@ -565,12 +701,22 @@ export async function migrate(cfg, ui = defaultUi) {
     if (decision.fallback) ui.warn(`Auto-fallback to mirror — ${decision.reason}`);
   }
 
+  // Fold a strip into the identity rewrite when we're rewriting anyway (one pass,
+  // not two). When mirroring (or no rewrite runs), the strip/LFS pass runs on its
+  // own just below. Dry-run rewrites nothing.
+  const foldStrip = largeFiles.action === 'strip' && largeFiles.offenders.length > 0
+    && decision.strategy === 'rewrite' && !cfg.dryRun;
+
   let rewrite = { rewritten: false, strategy: decision.strategy };
   if (decision.strategy === 'rewrite') {
-    rewrite = { ...(await rewriteHistory(cfg, ui)), strategy: 'rewrite' };
+    rewrite = { ...(await rewriteHistory(cfg, ui, { stripBlobsBiggerThanMB: foldStrip ? largeFiles.limitMb : null })), strategy: 'rewrite' };
   } else {
     ui.ok('Mirror strategy — copying history verbatim (no identity rewrite).');
   }
+
+  // Apply any remediation not folded into the rewrite (strip in mirror mode, or an
+  // LFS migration), then warn honestly about the rewritten history.
+  const remediation = await applyLargeFileRemediation(cfg, ui, largeFiles, { folded: foldStrip });
 
   // Resolve the branch set after the mirror exists. Default = every branch;
   // an explicit --branch list narrows it; --all-branches forces all.
@@ -579,14 +725,20 @@ export async function migrate(cfg, ui = defaultUi) {
     allBranches: !!cfg.allBranches,
     available: listBranches(cfg),
   });
-  const pushes = [];
-  for (const branch of branches) pushes.push(await pushBranch(cfg, branch, ui));
-
-  // Tags ride along when migrating the whole repo; a narrowed --branch run skips
-  // them (a tag could point at history we deliberately excluded).
+  // Belt & suspenders: even though the pre-flight scan normally prevents it, if a
+  // push is still rejected for an oversized file (GH001), translate the raw exit
+  // code into a plain-language message that names the remediation flags.
   const tags = cfg.branchesExplicit ? [] : listTags(cfg);
+  const pushes = [];
   const tagPushes = [];
-  for (const tag of tags) tagPushes.push(await pushTag(cfg, tag, ui));
+  try {
+    for (const branch of branches) pushes.push(await pushBranch(cfg, branch, ui));
+    for (const tag of tags) tagPushes.push(await pushTag(cfg, tag, ui));
+  } catch (e) {
+    const gh = parseGH001(`${e.message || ''}\n${e.stderr || ''}`);
+    if (!gh.matched) throw e;
+    throw new VectorError(formatGH001Guidance(gh, { maxFileSizeMb: largeFiles.limitMb }), EXIT.GIT);
+  }
 
   // Integrity gate: verify what we synced is intact on the destination. Skipped on
   // --dry-run (which wrote nothing). Any mismatch aborts with a precise report.
@@ -604,6 +756,8 @@ export async function migrate(cfg, ui = defaultUi) {
     rewrite,
     conflicts,
     caseSensitive: staging.caseSensitive,
+    largeFiles: { limitMb: largeFiles.limitMb, action: largeFiles.action, offenders: largeFiles.offenders },
+    remediation,
     branches,
     pushes,
     tags,

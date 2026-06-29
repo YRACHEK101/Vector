@@ -321,6 +321,8 @@ vector-migrate --non-interactive
 | `--dry-run` | — | Plan + rewrite locally, report the push plan, perform **no remote writes** |
 | `--force` | — | Allow force-push **only** on a true divergence |
 | `--force-existing` | — | Apply new identities to branches **already on the destination** (force-update — commit SHAs change for those branches) |
+| `--max-file-size <MB>` | `MAX_FILE_SIZE` | Per-file size threshold in MB (**default 100**, GitHub's hard limit). [Large files](#large-files-over-100-mb) |
+| `--on-large-file <action>` | `ON_LARGE_FILE` | What to do with files over the limit: `strip` \| `lfs` \| `abort` \| `prompt`. **Interactive default: `prompt`; non-interactive / `--force`: `strip`** |
 | `--work-dir <path>` | `WORK_DIR` | Staging directory (default `./.vector-staging`) |
 | `--json` | `JSON` | Machine-readable, one-JSON-object-per-line output (implies non-interactive) |
 | `-v`, `--verbose` | — | Extra diagnostic output |
@@ -509,6 +511,29 @@ It prints a summary, e.g. `Pushed: 3 new · Skipped (already present): 1 (master
 
 Changing an author's **name or email necessarily rewrites history** — those commits get **new SHAs** — so updating a branch that's already on the destination is, by definition, a **force-update**. Vector never does this implicitly. Pass `--force-existing` to opt in: branches that exist on the destination but differ because of the new mapping are force-pushed, after a warning that their commit SHAs will change. Branches not yet on the destination are still pushed normally; identical ones are still skipped.
 
+### Large files over 100 MB
+
+GitHub **hard-rejects any single file larger than 100 MB found anywhere in history** — and it does so at the *push*, after the expensive mirror + rewrite are already done. Vector catches this **before** the push: once the staging copy is built, it streams the whole object graph (`git rev-list --objects --all | git cat-file --batch-check` — nothing is checked out) and reports every offender with its path and size, e.g.:
+
+```
+Found 1 file exceeding GitHub's 100 MB limit: Cursor-1.0.0-x86_64.AppImage (182.19 MB)
+```
+
+What happens next depends on **`--on-large-file`**:
+
+| Action | Behaviour |
+| --- | --- |
+| `strip` | **Removes the file(s) from *all* history** via `git-filter-repo --strip-blobs-bigger-than`, then pushes. When an identity rewrite is also running, the strip is folded into the **same** filter-repo pass (one rewrite, not two). |
+| `lfs` | Moves the oversized paths to **Git LFS** (`git lfs migrate import`). Needs `git-lfs`; if it's missing, Vector prints install steps and falls back to `strip` (auto/`--force` runs) or aborts (interactive). |
+| `abort` | Stops with a clear, actionable message and changes nothing (the old fail-fast behaviour). |
+| `prompt` | Asks you (strip / LFS / abort). |
+
+**Defaults:** an **interactive** run defaults to `prompt`; a **non-interactive / `--force` / CI** run defaults to **`strip`** with a loud warning — so `vector-migrate --force …` "just fixes it and pushes" with no manual steps. Override the threshold with `--max-file-size <MB>`.
+
+Because stripping or LFS-migrating **rewrites history, commit SHAs change** — Vector says so, and **anyone with an existing clone of the destination must re-clone**. A repo with no oversized files is completely unaffected (the scan is fast and silent). Since the offender is usually a downloaded binary that shouldn't be versioned at all (e.g. an `.AppImage`), Vector also suggests a matching `.gitignore` line so it doesn't return on the next migration. As a final backstop, if a push is *still* rejected for size (`GH001`), Vector translates the raw `git push exited with code 1` into a plain-language message naming these flags.
+
+> Re-running the migration from the Azure source re-introduces the blob (it still lives in Azure's history), so the fix lives in Vector's rewrite/push stage and is applied on every run — not as a one-time manual cleanup.
+
 ---
 
 ## How It Works
@@ -550,6 +575,7 @@ For rewrite modes the comparison is against the **post-rewrite** mirror, so OIDs
 | Symptom | Cause & fix |
 | --- | --- |
 | `git-filter-repo is not installed` | Install it for your OS (see [Prerequisites](#prerequisites-git-filter-repo)); verify with `git filter-repo --version`. Vector fails fast rather than doing partial work. |
+| **`GH001` / "exceeds GitHub's file size limit"** | A file over 100 MB is somewhere in history. Vector now detects this **before** the push — re-run with `--force` (auto-strips) or pick `--on-large-file strip\|lfs`. See [Large files over 100 MB](#large-files-over-100-mb). |
 | **Exit 5** — "Branch … has DIVERGED" | The destination branch isn't a fast-forward of the rewritten history. Inspect it, then re-run with `--force-existing` to apply the new history (its SHAs change), or `--branch` to exclude it. Vector never overwrites it for you. |
 | **Exit 4** — "Integrity MISMATCH" | The destination doesn't match what was migrated (a ref tip or the commit count differs). The report lists the exact refs; re-run, or inspect the destination for outside changes. |
 | `the destination should be an SSH URL` | The destination must be SSH (`git@github.com:USER/REPO.git`), which is leak-proof and hang-proof. Convert an HTTPS dest with [GitHub SSH setup](#requirements-github-ssh-access). |

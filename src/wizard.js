@@ -127,6 +127,27 @@ export async function runMappingWizard(identities = []) {
   return buildIdentityEntries({ you, newIdentity, identities, teammates });
 }
 
+/**
+ * Ask how to handle files that exceed GitHub's size limit. Default is strip
+ * (the safe "just make the push work" choice). The LFS option is offered only
+ * when git-lfs is installed.
+ * @returns {Promise<'strip'|'lfs'|'abort'>}
+ */
+export async function chooseLargeFileAction(offenders = [], { lfsAvailable = false } = {}) {
+  const inquirer = await loadInquirer();
+  const choices = [
+    { name: 'Strip them from history (remove the file(s) from every commit, then push)', value: 'strip' },
+  ];
+  if (lfsAvailable) choices.push({ name: 'Move them to Git LFS (keep the file(s) via LFS pointers)', value: 'lfs' });
+  choices.push({ name: 'Abort (leave history unchanged — fix it yourself)', value: 'abort' });
+  const { choice } = await inquirer.prompt([{
+    type: 'list', name: 'choice', default: 'strip',
+    message: `${offenders.length} file(s) exceed GitHub's size limit. Stripping/LFS rewrites history (commit SHAs change). How should Vector proceed?`,
+    choices,
+  }]);
+  return choice;
+}
+
 /** The confirm gate before any rewrite. */
 export async function confirmProceed(message = 'Proceed?') {
   const inquirer = await loadInquirer();
