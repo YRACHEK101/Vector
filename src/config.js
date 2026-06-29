@@ -8,6 +8,11 @@ import { resolveMode, strategyForMode, detectHostKind, normalizeGitHubUrl } from
 export const DEFAULT_BRANCHES = ['master', 'main'];
 export const REQUIRED = ['azureUrl', 'githubSsh', 'oldEmail', 'newName', 'newEmail'];
 
+/** GitHub's hard per-file limit (MB) — the default --max-file-size threshold. */
+export const DEFAULT_MAX_FILE_MB = 100;
+/** Valid --on-large-file actions. */
+export const LARGE_FILE_ACTIONS = ['strip', 'lfs', 'abort', 'prompt'];
+
 /**
  * Process exit codes — documented in the README so scripts can branch on them.
  *   0 success · 2 bad input/usage · 3 git/subprocess failure ·
@@ -38,6 +43,39 @@ export function decideRewriteStrategy({ baseStrategy = 'rewrite', applicableComm
     fallback: true,
     reason: 'the identity mapping matched 0 commits in the source history — mirroring verbatim instead of rewriting (which would only change SHAs for no benefit).',
   };
+}
+
+/**
+ * Strict (throws): validate the user-supplied --max-file-size. Empty/unset → the
+ * GitHub default. Used in the CLI parse layer so a bad value is a clean usage error.
+ */
+export function validateMaxFileSize(v) {
+  if (v == null || String(v).trim() === '') return DEFAULT_MAX_FILE_MB;
+  const n = Number(v);
+  if (!Number.isFinite(n) || n <= 0) {
+    throw new VectorError(`--max-file-size must be a positive number of MB (got "${v}").`, EXIT.USAGE);
+  }
+  return n;
+}
+
+/** Strict (throws): validate the user-supplied --on-large-file action. */
+export function validateOnLargeFile(v) {
+  if (v == null || String(v).trim() === '') return '';
+  const s = String(v).trim().toLowerCase();
+  if (!LARGE_FILE_ACTIONS.includes(s)) {
+    throw new VectorError(`--on-large-file must be one of ${LARGE_FILE_ACTIONS.join('|')} (got "${v}").`, EXIT.USAGE);
+  }
+  return s;
+}
+
+/** Lenient (never throws): coerce for finalizeConfig, which must stay total. */
+export function coerceMaxFileMb(v) {
+  const n = Number(v);
+  return Number.isFinite(n) && n > 0 ? n : DEFAULT_MAX_FILE_MB;
+}
+export function coerceOnLargeFile(v) {
+  const s = String(v ?? '').trim().toLowerCase();
+  return LARGE_FILE_ACTIONS.includes(s) ? s : '';
 }
 
 /** Interpret an env flag as boolean: "1"/"true"/"yes"/"on" → true; "0"/""/unset → false. */
@@ -103,6 +141,9 @@ export function configFromEnv(env = process.env) {
     workDir: env.WORK_DIR || '',
     branches: env.PUSH_BRANCHES ? parseBranches(env.PUSH_BRANCHES) : [],
     sshKey: env.SSH_KEY || '',
+    // Large-file pre-flight: size threshold (MB) and what to do with offenders.
+    maxFileSize: env.MAX_FILE_SIZE || '',
+    onLargeFile: env.ON_LARGE_FILE || '',
     force: false,
     // Identity mapping sources (file / inline) and branch scope
     mailmapPath: env.MAILMAP || '',
@@ -241,6 +282,10 @@ export function finalizeConfig(cfg, { cwd = process.cwd() } = {}) {
     force: !!cfg.force,
     forceExisting: !!cfg.forceExisting,
     allBranches: !!cfg.allBranches,
+    // Large-file pre-flight (coerced, never throws — strict validation is in the CLI).
+    maxFileSizeMb: coerceMaxFileMb(cfg.maxFileSize),
+    onLargeFile: coerceOnLargeFile(cfg.onLargeFile),
+    skipLargeFileScan: !!cfg.skipLargeFileScan,
     mailmapText: resolved.text,
     rewriteEmails: resolved.rewriteEmails,
     hasNameOnlyMapping: resolved.hasNameOnly,

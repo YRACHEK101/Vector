@@ -5,21 +5,26 @@ import { spawn, spawnSync } from 'node:child_process';
 
 /**
  * Run a command to completion. By default it inherits stdio (so progress shows
- * live); pass { capture: true } to buffer stdout/stderr instead. Rejects with a
- * rich Error (carrying cmd/args/code/stderr) on non-zero exit or spawn failure.
+ * live); pass { capture: true } to buffer stdout/stderr instead. With
+ * { capture: true, tee: true } stderr is BOTH captured and echoed live (and
+ * stdout is inherited) — used for `git push`, so progress still streams while we
+ * keep stderr to recognise GitHub's oversized-file rejection. Rejects with a rich
+ * Error (carrying cmd/args/code/stderr) on non-zero exit or spawn failure.
  */
-export function run(cmd, args, { cwd, env, capture = false } = {}) {
+export function run(cmd, args, { cwd, env, capture = false, tee = false } = {}) {
   return new Promise((resolve, reject) => {
     const child = spawn(cmd, args, {
       cwd,
       env: { ...process.env, ...env },
-      stdio: capture ? ['ignore', 'pipe', 'pipe'] : ['ignore', 'inherit', 'inherit'],
+      stdio: capture
+        ? ['ignore', tee ? 'inherit' : 'pipe', 'pipe']
+        : ['ignore', 'inherit', 'inherit'],
     });
     let stdout = '';
     let stderr = '';
     if (capture) {
-      child.stdout.on('data', (d) => { stdout += d; });
-      child.stderr.on('data', (d) => { stderr += d; });
+      if (child.stdout) child.stdout.on('data', (d) => { stdout += d; });
+      child.stderr.on('data', (d) => { stderr += d; if (tee) process.stderr.write(d); });
     }
     child.on('error', (e) =>
       reject(Object.assign(new Error(`Failed to start "${cmd}": ${e.message}`), { cmd, args })));
