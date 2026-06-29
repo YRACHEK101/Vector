@@ -1,6 +1,6 @@
 {
   "name": "vector-migrate",
-  "version": "2.5.0",
+  "version": "2.6.0",
   "description": "Interactive, zero-token CLI that migrates Azure DevOps repositories to GitHub, preserving full commit history and rewriting author identities so the contribution graph stays intact.",
   "type": "module",
   "bin": {

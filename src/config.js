@@ -144,6 +144,9 @@ export function configFromEnv(env = process.env) {
     // Large-file pre-flight: size threshold (MB) and what to do with offenders.
     maxFileSize: env.MAX_FILE_SIZE || '',
     onLargeFile: env.ON_LARGE_FILE || '',
+    // Identity matching: skip rewriting outright, or declare which author is you.
+    skipIdentity: parseBool(env.SKIP_IDENTITY),
+    me: env.ME || '',
     force: false,
     // Identity mapping sources (file / inline) and branch scope
     mailmapPath: env.MAILMAP || '',
@@ -196,11 +199,12 @@ export function validateRun(final, { interactive = false } = {}) {
   }
   // Mirror mode (B, or a rewrite mode that will auto-fallback) needs no mapping; only
   // rewrite modes require a complete mapping up front when there is no prompt available.
+  // --skip-identity (or a resolved auto-skip) drops that requirement: it's a mirror.
   const rewriteMode = final.baseStrategy ? final.baseStrategy === 'rewrite' : final.mode !== 'b';
-  if (!interactive && rewriteMode) {
+  if (!interactive && rewriteMode && !final.skipIdentity) {
     const hasMapping = !!(final.mailmapText && final.mailmapText.trim());
     if (!hasMapping) {
-      errors.push('A rewrite run with no prompt needs a complete identity mapping: provide --mailmap, --map, or --old-email with --new-name/--new-email (or use --mode b for a verbatim mirror).');
+      errors.push('A rewrite run with no prompt needs a complete identity mapping: provide --mailmap, --map, or --old-email with --new-name/--new-email; declare yourself with --me <email>; or skip with --skip-identity (or --mode b for a verbatim mirror).');
     }
   }
   return { ok: errors.length === 0, errors };
@@ -286,6 +290,9 @@ export function finalizeConfig(cfg, { cwd = process.cwd() } = {}) {
     maxFileSizeMb: coerceMaxFileMb(cfg.maxFileSize),
     onLargeFile: coerceOnLargeFile(cfg.onLargeFile),
     skipLargeFileScan: !!cfg.skipLargeFileScan,
+    // Identity matching / skipping.
+    skipIdentity: !!cfg.skipIdentity,
+    me: String(cfg.me || '').trim(),
     mailmapText: resolved.text,
     rewriteEmails: resolved.rewriteEmails,
     hasNameOnlyMapping: resolved.hasNameOnly,

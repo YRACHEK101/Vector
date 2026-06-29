@@ -4,6 +4,22 @@ All notable changes to `vector-migrate` are documented here. This project follow
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.6.0] - 2026-06-29
+
+### Added
+
+- **Auto-skip identity rewriting when you're not a contributor.** Migrating a repo you never committed to no longer dead-ends on the forced "Which detected author is YOU?" prompt (where every choice was wrong).
+  - **Unified auto-match** (`matchYou`, one testable function) tries several signals, case-insensitively, in priority order: the **new verified email** you entered, the **name** you entered, your local `git config user.email`/`user.name`, and your authenticated **GitHub username** — email first, then name. A confident match is selected automatically with a short confirmation and **no prompt** (the existing "matches your git config" behaviour is unchanged).
+  - **When no author matches you:** interactive runs now always offer an explicit final option — `❮ None of these — I didn't contribute to this repo (skip identity rewriting) ❯` — and non-interactive / `--force` / CI runs **auto-skip** with a clear warning (`No detected author matches you — skipping identity rewrite, all authors kept unchanged`) instead of erroring.
+  - **Skipping = a plain mirror:** all author/committer identities are pushed **unchanged**; the identity `git-filter-repo` pass is not run. Everyone's commits stay attributed to them.
+  - **`--me <email-or-name>`** — declare up front which detected author is you, bypassing the match. A value that matches no author warns and falls back to skip (`--force`) or the prompt (interactive).
+  - **`--skip-identity`** (alias **`--no-identity`**, env `SKIP_IDENTITY`) — skip identity rewriting outright; never prompt, mirror with every author kept.
+
+### Notes
+
+- It is impossible to rewrite an author's commits into your identity unless you were actually matched or explicitly chose that author — the "picked the wrong person by accident" failure mode is eliminated.
+- The existing happy path (you are a contributor and are auto-matched or select yourself) is unchanged.
+
 ## [2.5.0] - 2026-06-29
 
 ### Added

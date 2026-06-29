@@ -315,6 +315,8 @@ vector-migrate --non-interactive
 | `--new-name` | `NEW_NAME` | …mapped to this author name |
 | `--new-email` | `NEW_EMAIL` | …and this verified GitHub email |
 | `--extra-old-emails` | `EXTRA_OLD_EMAILS` | More old emails of yours (comma-separated) |
+| `--me <email-or-name>` | `ME` | Declare which detected author is **you** (skips the "which author is you?" match). [Not a contributor?](#not-a-contributor-auto-skip-identity) |
+| `--skip-identity` (`--no-identity`) | `SKIP_IDENTITY` | Don't rewrite identities — mirror with **every author kept unchanged** |
 | `--branch <name>` | `PUSH_BRANCHES` | Limit to specific branch(es); **repeatable** (also `--branches "a,b"`). Narrowing **skips tags**. **Default: all branches + tags** |
 | `--all-branches` | `ALL_BRANCHES` | Migrate every branch (the default) |
 | `--sync` | `SYNC` | Incremental sync onto an existing target: fast-forward only; **prompts/stops on a true divergence** |
@@ -510,6 +512,32 @@ It prints a summary, e.g. `Pushed: 3 new · Skipped (already present): 1 (master
 ### Applying new identities to branches already pushed (`--force-existing`)
 
 Changing an author's **name or email necessarily rewrites history** — those commits get **new SHAs** — so updating a branch that's already on the destination is, by definition, a **force-update**. Vector never does this implicitly. Pass `--force-existing` to opt in: branches that exist on the destination but differ because of the new mapping are force-pushed, after a warning that their commit SHAs will change. Branches not yet on the destination are still pushed normally; identical ones are still skipped.
+
+### Not a contributor? (auto-skip identity)
+
+Identity rewriting only makes sense when **you** are one of the repo's authors. When you migrate a repo you never committed to, none of the detected authors is you — so Vector must **not** force you to pick one (picking any author would rewrite *that* person's commits into your name). Instead it tries to recognise you, and if it can't, it skips rewriting and keeps everyone as-is.
+
+**How Vector matches you** — case-insensitively, in priority order:
+
+1. the **email** you entered as your new verified email,
+2. the **name** you entered,
+3. your local `git config user.email` / `user.name`,
+4. your authenticated **GitHub username**.
+
+Email is tried first (most reliable), then name. On a confident match Vector selects you automatically and prints a short confirmation (e.g. *"Detected you as … (matches your git config)"*) — **no prompt**, behaviour unchanged from before.
+
+**When no author matches you:**
+
+- **Interactive:** the "Which detected author is YOU?" list always includes an explicit final option —
+  `❮ None of these — I didn't contribute to this repo (skip identity rewriting) ❯` — and choosing it skips the rewrite and continues.
+- **Non-interactive / `--force` / CI:** Vector **auto-skips** identity rewriting (`No detected author matches you — skipping identity rewrite, all authors kept unchanged`) and continues. It never blocks or errors.
+
+When the rewrite is skipped, Vector performs a **plain mirror**: all author/committer identities are pushed **unchanged**, so everyone's commits stay attributed to them. Two flags make this explicit and scriptable:
+
+- **`--me <email-or-name>`** — declare up front which detected author is you, bypassing the match. If the value matches no author, Vector warns and falls back to skip (in `--force`) or to the prompt (interactive).
+- **`--skip-identity`** (alias `--no-identity`) — skip identity rewriting outright; never prompt, mirror with every author kept.
+
+> Vector never rewrites an author's commits into your identity unless you were actually matched or explicitly chose that author — so "picked the wrong person by accident" can't happen.
 
 ### Large files over 100 MB
 
