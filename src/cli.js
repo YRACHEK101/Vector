@@ -16,7 +16,8 @@ import { MODES } from './modes.js';
 import { checkPrerequisites } from './prereqs.js';
 import { doctor } from './doctor.js';
 import { migrate, ensureSshReady, syncSourceMirror, listAuthors, listBranches, formatPushSummary } from './pipeline.js';
-import { parseMailmap, entriesToMailmap, summarizeMapping } from './team.js';
+import { parseMailmap, entriesToMailmap, summarizeMapping, planIdentityMatch } from './team.js';
+import { query } from './git.js';
 import {
   checkGithubSsh, checkAzureSsh, formatSshStatus,
   findSshKey, listLocalSshKeys, sshKeyGuidance, isAzureSshUrl, azureSshHost,
@@ -59,6 +60,9 @@ ${c.bold('IDENTITY MAPPING')} (modes A/C; any combination, highest precedence fi
   --new-name <name>          NEW_NAME           …mapped to this name
   --new-email <email>        NEW_EMAIL          …and this verified GitHub email
   --extra-old-emails <list>  EXTRA_OLD_EMAILS   More old emails of yours (comma sep)
+  --me <email-or-name>       ME                 Declare which detected author is YOU (skips the "who are you?" prompt)
+  --skip-identity            SKIP_IDENTITY      Don't rewrite identities — mirror with every author kept (alias: --no-identity)
+  (If you aren't a detected author and don't match any signal, identity rewriting is skipped automatically.)
 
 ${c.bold('BRANCHES & SAFETY')}
   --branch <name>            PUSH_BRANCHES      Limit to specific branch (repeatable; skips tags)
@@ -97,12 +101,13 @@ const VALUE_FLAGS = {
   // New surface
   '--mode': 'mode', '--source': 'source', '--dest': 'dest', '--work-dir': 'workDir',
   '--max-file-size': 'maxFileSize', '--on-large-file': 'onLargeFile',
+  '--me': 'me',
 };
 
 export function parseArgs(argv) {
   const opts = {
     help: false, version: false, check: false, doctor: false, force: false, forceExisting: false,
-    assumeYes: false, nonInteractive: false, allBranches: false,
+    assumeYes: false, nonInteractive: false, allBranches: false, skipIdentity: false,
     dryRun: false, sync: false, json: false, verbose: false,
     interactive: !!process.stdin.isTTY,
     overrides: {}, branchList: [], mapList: [],
@@ -122,6 +127,7 @@ export function parseArgs(argv) {
     else if (a === '-y' || a === '--yes') opts.assumeYes = true;
     else if (a === '--non-interactive') { opts.nonInteractive = true; opts.interactive = false; }
     else if (a === '--all-branches') opts.allBranches = true;
+    else if (a === '--skip-identity' || a === '--no-identity') opts.skipIdentity = true;
     else if (a === '--branch') { const v = argv[++i]; if (!v) throw new Error('--branch needs a value'); opts.branchList.push(v); }
     else if (a === '--map') { const v = argv[++i]; if (v == null) throw new Error('--map needs a value'); opts.mapList.push(v); }
     else if (VALUE_FLAGS[a]) { const v = argv[++i]; if (v == null) throw new Error(`${a} needs a value`); opts.overrides[VALUE_FLAGS[a]] = v; }
@@ -143,6 +149,7 @@ function assembleConfig(opts) {
   if (opts.force) ov.force = true;
   if (opts.forceExisting) ov.forceExisting = true;
   if (opts.allBranches) ov.allBranches = true;
+  if (opts.skipIdentity) ov.skipIdentity = true;
   if (opts.dryRun) ov.dryRun = true;
   if (opts.sync) ov.sync = true;
   if (opts.json) ov.json = true;
@@ -289,36 +296,75 @@ export async function run(argv) {
   let final = finalizeConfig(cfg);
 
   // ── Fail-fast SSH preflight before any mirror/rewrite work ──
-  await ensureSshReady(final, log);
+  const sshRes = await ensureSshReady(final, log);
+  const githubUser = (sshRes && sshRes.githubUser) || ''; // a signal for auto-matching "you"
   cfg = mergeConfigs(cfg, { skipSshPreflight: true });
   final = finalizeConfig(cfg);
 
-  // ── Steps 3–5 (interactive rewrite modes): mirror → scan → map identities ──
-  // Mirror mode (B, or an inferred 0-mapping run) needs no identity mapping.
+  // ── Steps 3–5 (rewrite modes with no explicit mapping): mirror → scan → match you ──
+  // Mirror mode (B), an explicit mapping, or --skip-identity all bypass this.
   const haveMapping = !!(final.mailmapText && final.mailmapText.trim());
   const wantsRewrite = final.baseStrategy === 'rewrite';
-  if (opts.interactive && wantsRewrite && !haveMapping) {
-    const baseV = validateRun(final, { interactive: true });
-    if (!baseV.ok) throw new VectorError(`Incomplete configuration:\n  - ${baseV.errors.join('\n  - ')}`, EXIT.USAGE);
+  if (wantsRewrite && !haveMapping && !final.skipIdentity) {
+    if (opts.interactive) {
+      const baseV = validateRun(final, { interactive: true });
+      if (!baseV.ok) throw new VectorError(`Incomplete configuration:\n  - ${baseV.errors.join('\n  - ')}`, EXIT.USAGE);
 
-    log.step('Mirroring the source repository and scanning authors + branches');
-    await syncSourceMirror(final, log);
-    const identities = listAuthors(final); // scans the fetched mirror, never a local clone
-    const branchesAvail = listBranches(final, final.sourceMirror);
-    if (!identities.length) throw new VectorError('No author identities found in the mirrored repository.', EXIT.GIT);
-    log.ok(`Detected ${identities.length} author(s) across ${branchesAvail.length} branch(es).`);
+      log.step('Mirroring the source repository and scanning authors + branches');
+      await syncSourceMirror(final, log);
+      const identities = listAuthors(final); // scans the fetched mirror, never a local clone
+      const branchesAvail = listBranches(final, final.sourceMirror);
+      if (!identities.length) throw new VectorError('No author identities found in the mirrored repository.', EXIT.GIT);
+      log.ok(`Detected ${identities.length} author(s) across ${branchesAvail.length} branch(es).`);
 
-    const { runMappingWizard } = await import('./wizard.js');
-    const entries = await runMappingWizard(identities);
-    cfg = mergeConfigs(cfg, { mailmapText: entriesToMailmap(entries) });
-    final = finalizeConfig(cfg);
-    final._identities = identities;
-    final._branchesAvail = branchesAvail;
+      const { runMappingWizard } = await import('./wizard.js');
+      const { entries, skipped } = await runMappingWizard(identities, { githubUser, me: final.me });
+      if (skipped) {
+        log.warn('No author matched you — skipping identity rewrite, all authors kept unchanged.');
+        cfg = mergeConfigs(cfg, { skipIdentity: true });
+      } else {
+        cfg = mergeConfigs(cfg, { mailmapText: entriesToMailmap(entries) });
+      }
+      final = finalizeConfig(cfg);
+      final._identities = identities;
+      final._branchesAvail = branchesAvail;
+    } else {
+      // Non-interactive / --force / CI: scan, auto-match across every signal, and if
+      // no detected author is you, auto-SKIP identity rewriting (never block). This is
+      // the "I'm not a contributor — just mirror it" path.
+      log.step('Mirroring the source repository and scanning authors');
+      await syncSourceMirror(final, log);
+      const identities = listAuthors(final);
+      if (!identities.length) throw new VectorError('No author identities found in the mirrored repository.', EXIT.GIT);
+      log.ok(`Detected ${identities.length} author(s).`);
+
+      const gitName = query('git', ['config', '--global', 'user.name']) || '';
+      const gitEmail = query('git', ['config', '--global', 'user.email']) || '';
+      const plan = planIdentityMatch({ identities, newName: final.newName, newEmail: final.newEmail, gitName, gitEmail, githubUser, me: final.me });
+      if (!plan.skip) {
+        log.ok(`Auto-matched you as ${plan.matched.name} <${plan.matched.email}> — rewriting your commits to ${plan.newIdentity.name || plan.matched.name} <${plan.newIdentity.email}>.`);
+        cfg = mergeConfigs(cfg, { mailmapText: entriesToMailmap(plan.entries) });
+      } else {
+        if (plan.matched) {
+          log.warn(`Matched you as ${plan.matched.name} <${plan.matched.email}> but no new identity was given (--new-email) — skipping identity rewrite, all authors kept unchanged.`);
+        } else {
+          if (final.me) log.warn(`--me "${final.me}" didn't match any detected author.`);
+          log.warn('No detected author matches you — skipping identity rewrite, all authors kept unchanged.');
+        }
+        cfg = mergeConfigs(cfg, { skipIdentity: true });
+      }
+      final = finalizeConfig(cfg);
+      final._identities = identities;
+    }
   }
 
   // ── Validate completeness (strict in non-interactive) ──
   const v = validateRun(final, { interactive: opts.interactive });
   if (!v.ok) throw new VectorError(`Incomplete configuration:\n  - ${v.errors.join('\n  - ')}`, EXIT.USAGE);
+
+  // Effective rewrite decision after matching/skip resolution (drives summary + confirm).
+  const willRewrite = !final.skipIdentity && final.baseStrategy === 'rewrite'
+    && !!(final.mailmapText && final.mailmapText.trim());
 
   // ── Summary ──
   log.step('Summary');
@@ -327,10 +373,12 @@ export async function run(argv) {
   log.info(`  ${c.dim('Source     :')} ${final.azureUrl}`);
   log.info(`  ${c.dim('Destination:')} ${final.githubSsh}`);
   log.info(`  ${c.dim('Branches   :')} ${branchDisplay(final)}`);
-  if (final._identities) {
+  if (final.skipIdentity) {
+    log.info(`  ${c.dim('Identities :')} rewrite SKIPPED — all authors kept unchanged`);
+  } else if (final._identities) {
     const s = summarizeMapping(final._identities, parseMailmap(final.mailmapText));
     log.info(`  ${c.dim('Identities :')} ${s.authors} authors · ${s.mapped} mapped · ${s.unchanged} kept`);
-  } else if (wantsRewrite) {
+  } else if (willRewrite) {
     log.info(`  ${c.dim('Identities :')} ${final.rewriteEmails.length} mapped, others kept`);
   } else {
     log.info(`  ${c.dim('Identities :')} mirror — copied verbatim (no rewrite)`);
@@ -340,7 +388,7 @@ export async function run(argv) {
   if (opts.interactive && !opts.assumeYes) {
     const { confirmProceed } = await import('./wizard.js');
     const n = final.rewriteEmails.length;
-    const msg = !wantsRewrite
+    const msg = !willRewrite
       ? (final.dryRun ? 'Plan this mirror (dry-run, no writes)?' : 'Mirror this repository to the destination?')
       : (final.dryRun ? 'Plan this rewrite (dry-run, no writes)?'
         : (n > 1 ? `This rewrites ${n} identities — including OTHER people's commits. Proceed and push?` : 'Rewrite history and push?'));

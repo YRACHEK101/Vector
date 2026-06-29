@@ -651,12 +651,14 @@ export async function ensureSshReady(cfg, ui = defaultUi, deps = {}) {
 
   // 3a. GitHub auth — always required for the push. Fails only if NO key authenticates;
   //     the message then names every local key and exactly where to register one.
+  let githubUser;
   if (needGithub) {
     const check = deps.githubCheck || cfg._sshCheck || checkGithubSsh;
     const res = await check({ env: cfg.gitEnv, keyPath });
     if (!res.ok) {
       throw new Error(sshAuthFailureGuidance({ platform, keys: listKeys({}), service: 'github', reason: res.reason }));
     }
+    githubUser = res.user;
     ui.ok(`GitHub SSH OK — authenticated as ${res.user || 'your account'}.`);
   }
 
@@ -673,7 +675,7 @@ export async function ensureSshReady(cfg, ui = defaultUi, deps = {}) {
     ui.info('Azure source is HTTPS — skipping Azure SSH checks (only GitHub SSH is needed).');
   }
 
-  return { ok: true, needGithub, needAzure };
+  return { ok: true, needGithub, needAzure, githubUser };
 }
 
 /** Full pipeline: idempotent, incremental, non-destructive, mode-routed, integrity-checked. */
@@ -695,7 +697,12 @@ export async function migrate(cfg, ui = defaultUi) {
   // rewriting nothing would only churn SHAs for no benefit.
   const entries = parseMailmap(cfg.mailmapText || '');
   let decision = { strategy: cfg.baseStrategy || 'rewrite', fallback: false };
-  if ((cfg.baseStrategy || 'rewrite') === 'rewrite') {
+  if (cfg.skipIdentity) {
+    // The operator isn't a contributor (or asked to skip): keep every author and
+    // committer exactly as-is — a plain mirror, no identity git-filter-repo pass.
+    ui.ok('Identity rewrite skipped — all author/committer identities kept unchanged.');
+    decision = { strategy: 'mirror', fallback: false, skippedIdentity: true };
+  } else if ((cfg.baseStrategy || 'rewrite') === 'rewrite') {
     const applicable = entries.length > 0 && mappingsApplicable(historyIdentities(cfg), entries);
     decision = decideRewriteStrategy({ baseStrategy: 'rewrite', applicableCommits: applicable ? 1 : 0 });
     if (decision.fallback) ui.warn(`Auto-fallback to mirror — ${decision.reason}`);
@@ -752,6 +759,7 @@ export async function migrate(cfg, ui = defaultUi) {
   return {
     mode: sync.mode,
     strategy: decision.strategy,
+    skippedIdentity: !!decision.skippedIdentity,
     fallback: decision.fallback ? decision.reason : null,
     rewrite,
     conflicts,

@@ -7,7 +7,16 @@
 // ─────────────────────────────────────────────────────────────────────────────
 import { deriveProjectSlug } from './config.js';
 import { query } from './git.js';
-import { resolveYou, defaultNewIdentity, buildIdentityEntries, myUnifyEmails } from './team.js';
+import { defaultNewIdentity, buildIdentityEntries, myUnifyEmails, matchYou, youSignals } from './team.js';
+
+// Sentinel + label for the explicit "I'm not a contributor — skip" escape hatch in
+// the "Which detected author is YOU?" list. The sentinel can't collide with a real
+// email (every real choice value is an address with an '@'), so appending it never
+// disturbs the existing choices.
+export const SKIP_IDENTITY_VALUE = '__vector_skip_identity__';
+export const SKIP_IDENTITY_LABEL = "❮ None of these — I didn't contribute to this repo (skip identity rewriting) ❯";
+
+const sameCi = (a, b) => String(a ?? '').trim().toLowerCase() === String(b ?? '').trim().toLowerCase();
 
 const required = (v) => (String(v ?? '').trim() ? true : 'This value is required.');
 const requiredEmail = (v) => (/^[^\s@<>]+@[^\s@<>]+$/.test(String(v ?? '').trim()) ? true : 'Enter a valid email address.');
@@ -62,10 +71,12 @@ export async function runBaseWizard(initial = {}, { sourceLabel = 'Azure DevOps 
  * picked) to your new identity, keep everyone else. Operator may opt to remap
  * teammates too. Returns mailmap entries.
  */
-export async function runMappingWizard(identities = []) {
-  const inquirer = await loadInquirer();
-  const gitName = query('git', ['config', '--global', 'user.name']) || '';
-  const gitEmail = query('git', ['config', '--global', 'user.email']) || '';
+export async function runMappingWizard(identities = [], opts = {}) {
+  const inquirer = opts.inquirer || await loadInquirer();
+  const gitName = opts.gitName != null ? opts.gitName : (query('git', ['config', '--global', 'user.name']) || '');
+  const gitEmail = opts.gitEmail != null ? opts.gitEmail : (query('git', ['config', '--global', 'user.email']) || '');
+  const githubUser = opts.githubUser || '';
+  const me = opts.me || '';
 
   // Your new identity (defaults from global git config — usually your GitHub identity).
   const def = defaultNewIdentity({ gitName, gitEmail }) || { name: '', email: '' };
@@ -75,15 +86,30 @@ export async function runMappingWizard(identities = []) {
   ]);
   const newIdentity = { name: newAns.newName.trim(), email: newAns.newEmail.trim() };
 
-  // Who is "you"? Pre-select by matching git email; otherwise ask.
-  let you = resolveYou({ identities, gitEmail });
+  // Who is "you"? Auto-match across every signal (new email/name, git config, the
+  // GitHub username, an explicit --me) — email first, then name. If none matches,
+  // never force a wrong pick: offer the list PLUS an explicit "skip" escape.
+  const { emails, names } = youSignals({ newName: newIdentity.name, newEmail: newIdentity.email, gitName, gitEmail, githubUser, me });
+  let you = matchYou({ identities, emails, names });
   if (you) {
-    process.stderr.write(`  Detected you as ${you.name} <${you.email}> (matches your git config).\n`);
+    const why = sameCi(you.email, gitEmail) ? 'matches your git config'
+      : sameCi(you.email, newIdentity.email) ? 'matches the email you entered'
+        : 'auto-matched';
+    process.stderr.write(`  Detected you as ${you.name} <${you.email}> (${why}).\n`);
   } else {
+    if (me) process.stderr.write(`  --me "${me}" didn't match any detected author — pick below, or choose “None”.\n`);
     const { youEmail } = await inquirer.prompt([{
       type: 'list', name: 'youEmail', message: 'Which detected author is YOU?',
-      choices: identities.map((id) => ({ name: `${id.name} <${id.email}>`, value: id.email })),
+      choices: [
+        ...identities.map((id) => ({ name: `${id.name} <${id.email}>`, value: id.email })),
+        new inquirer.Separator(),
+        { name: SKIP_IDENTITY_LABEL, value: SKIP_IDENTITY_VALUE },
+      ],
     }]);
+    if (youEmail === SKIP_IDENTITY_VALUE) {
+      process.stderr.write('  Skipping identity rewriting — all authors kept unchanged.\n');
+      return { entries: [], skipped: true };
+    }
     you = identities.find((id) => id.email === youEmail);
   }
 
@@ -124,7 +150,7 @@ export async function runMappingWizard(identities = []) {
     }
   }
 
-  return buildIdentityEntries({ you, newIdentity, identities, teammates });
+  return { entries: buildIdentityEntries({ you, newIdentity, identities, teammates }), skipped: false };
 }
 
 /**
