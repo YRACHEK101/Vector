@@ -626,6 +626,49 @@ A pure-Bash implementation (`migrate.sh`, with `tests/run_tests.sh`) is also inc
 
 ---
 
+## 📦 Version history
+
+A per-release summary of **features added (✨)** and **issues fixed (🐛)**, newest first. Full detail in [`CHANGELOG.md`](CHANGELOG.md). This project follows [Semantic Versioning](https://semver.org/).
+
+### 2.6.0 — auto-skip identity when you're not a contributor
+- ✨ **Auto-matches "you"** across signals — the new email/name you enter, local `git config`, and your authenticated **GitHub username** (email first, then name); a confident match selects you with **no prompt**.
+- ✨ When **no author matches you**, Vector **skips identity rewriting and keeps every author unchanged** instead of forcing a wrong pick: interactive runs get a `❮ None of these — I didn't contribute to this repo (skip identity rewriting) ❯` option; `--force`/CI auto-skips.
+- ✨ New flags **`--me <email-or-name>`** (declare which author is you) and **`--skip-identity`** / `--no-identity`.
+- 🐛 Fixes the dead-end where migrating a repo you **never committed to** had no valid answer to "Which detected author is YOU?" (every pick wrongly rewrote that person's commits into your name).
+
+### 2.5.0 — automatic 100 MB file-size handling
+- ✨ **Pre-flight scan** detects any blob over GitHub's **100 MB** limit *anywhere in history* **before** the push, reporting each offender's path + size.
+- ✨ New flags **`--max-file-size <MB>`** and **`--on-large-file strip|lfs|abort|prompt`**; `--force`/CI defaults to **`strip`** (folded into the existing `git-filter-repo` pass), with a Git **LFS** path (`lfs`).
+- 🐛 Fixes the late, expensive failure where a push was hard-rejected (`GH001: Large files detected`) only **after** the full mirror + rewrite — and surfaced as a raw `git push exited with code 1`. The error is now translated into a plain-language message naming the fix flags.
+
+### 2.4.0 — modes, integrity, sync
+- ✨ Three routing **modes** (A: Azure→GitHub rewrite · B: mirror-only · C: **GitHub→GitHub**), selectable with `--mode`.
+- ✨ **Zero-miss integrity engine** — verifies the full ref set (branches + tags), each ref-tip OID, and the reachable commit count after every push (exit 4 on mismatch); tags now migrate too.
+- ✨ `--sync` (ff-only incremental, exit 5 on divergence), `--dry-run`, `--json`, `--source`/`--dest`, `--work-dir`, `-v/--verbose`, plus a **0-commit auto-fallback** (rewrite → mirror).
+
+### 2.3.2 — fix
+- 🐛 **Directory-case branch collisions** (e.g. `yRachek/Front-end` vs `yrachek/E2E-test`) no longer strand un-rewritten commits on case-insensitive (macOS/Windows) filesystems; the stray segment is re-cased to one canonical spelling, preserving every branch and commit.
+
+### 2.3.1 — fix
+- 🐛 **Auto-unifies every name under your email(s)** (source *and* new email) so the post-rewrite safety check can't dead-end; the remap step now groups other authors by email and names the exact `Name <email>` pairs on any failure.
+
+### 2.3.0 — flexible identity remapping
+- ✨ A mapping can change **name only**, **email only**, or **both**, and several source identities can be **unified into one** canonical `Name <email>`; new **`--force-existing`**.
+- 🐛 **Per-mapping safety check** no longer false-fails on name-only/unify remaps; idempotent, incremental push that skips identical branches and reports differing ones.
+
+### 2.2.0 / 2.2.1 — diagnostics & docs
+- ✨ **`--doctor`** — environment diagnostic with a `[✓]/[✗]` PASS/FAIL report and a one-line fix per failure (changes nothing, CI-friendly); from-scratch OS guides + a CI matrix (Ubuntu/macOS, Node 18/20).
+
+### 2.1.0 / 2.1.1 — SSH robustness
+- 🐛 The preflight **no longer pins to a single key** — it offers the ssh-agent and **every** default key and passes if *any* is registered (matching the real clone/push); failure guidance lists each local key with the OS-correct print command and the registration link.
+- ✨ **`--ssh-key <path>`** honored end-to-end; `--check` lists every local SSH key.
+
+### 2.0.0 — Windows robustness
+- ✨ **SSH preflight** with key-generation guidance, non-interactive **host-key trust**, and Azure SSH auth verification; **automatic case-insensitive branch-conflict resolution** (`fsutil` case-sensitive scratch storage on Windows, else rename/skip); richer `--check`.
+- 🐛 No more `cannot lock ref 'refs/heads/X'` crashes on Windows; keyless/mis-configured-SSH runs **fail fast with guidance** instead of failing at the push after a full mirror clone.
+
+---
+
 ## Contributing
 
 Contributions are welcome!
