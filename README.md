@@ -517,14 +517,12 @@ Changing an author's **name or email necessarily rewrites history** — those co
 
 Identity rewriting only makes sense when **you** are one of the repo's authors. When you migrate a repo you never committed to, none of the detected authors is you — so Vector must **not** force you to pick one (picking any author would rewrite *that* person's commits into your name). Instead it tries to recognise you, and if it can't, it skips rewriting and keeps everyone as-is.
 
-**How Vector matches you** — case-insensitively, in priority order:
+**How Vector matches you** — by **email only**, the one reliable unique identifier. It compares (case-insensitively, full-address equality — never just a shared domain):
 
-1. the **email** you entered as your new verified email,
-2. the **name** you entered,
-3. your local `git config user.email` / `user.name`,
-4. your authenticated **GitHub username**.
+1. the **email** you entered as your new verified email, and
+2. your local `git config user.email`.
 
-Email is tried first (most reliable), then name. On a confident match Vector selects you automatically and prints a short confirmation (e.g. *"Detected you as … (matches your git config)"*) — **no prompt**, behaviour unchanged from before.
+If either equals a detected author's email, Vector selects you automatically and prints a short confirmation (e.g. *"Detected you as … (matches your git config)"*) — **no prompt**. Vector deliberately does **not** auto-match on names (`git config user.name`, your GitHub username, or a typed display name): names coincide far too easily — especially inside one company — and a wrong name match would silently rewrite **someone else's** commits into your identity. If your email isn't among the authors, you're treated as a non-contributor and the skip path runs (below). To self-identify by name anyway, pass it explicitly with `--me "Your Name"`.
 
 **When no author matches you:**
 
@@ -630,8 +628,11 @@ A pure-Bash implementation (`migrate.sh`, with `tests/run_tests.sh`) is also inc
 
 A per-release summary of **features added (✨)** and **issues fixed (🐛)**, newest first. Full detail in [`CHANGELOG.md`](CHANGELOG.md). This project follows [Semantic Versioning](https://semver.org/).
 
+### 2.6.1 — match contributor identity by email only
+- 🐛 **Fixes a false-positive match** that wrongly identified non-contributors as you and suppressed the v2.6.0 auto-skip. Vector now matches you by **email only** (exact, case-insensitive — never a shared domain); name-based auto-matching (`git config user.name`, GitHub handle, typed name) is removed because names coincide too easily and could silently rewrite someone else's commits. Genuine email matches are unchanged; self-identify by name with an explicit `--me "Your Name"`.
+
 ### 2.6.0 — auto-skip identity when you're not a contributor
-- ✨ **Auto-matches "you"** across signals — the new email/name you enter, local `git config`, and your authenticated **GitHub username** (email first, then name); a confident match selects you with **no prompt**.
+- ✨ **Auto-matches "you"** by the new email you enter or your local `git config user.email` (exact, case-insensitive); a confident match selects you with **no prompt**. *(2.6.1 narrowed this to email-only — see above.)*
 - ✨ When **no author matches you**, Vector **skips identity rewriting and keeps every author unchanged** instead of forcing a wrong pick: interactive runs get a `❮ None of these — I didn't contribute to this repo (skip identity rewriting) ❯` option; `--force`/CI auto-skips.
 - ✨ New flags **`--me <email-or-name>`** (declare which author is you) and **`--skip-identity`** / `--no-identity`.
 - 🐛 Fixes the dead-end where migrating a repo you **never committed to** had no valid answer to "Which detected author is YOU?" (every pick wrongly rewrote that person's commits into your name).

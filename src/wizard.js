@@ -86,11 +86,13 @@ export async function runMappingWizard(identities = [], opts = {}) {
   ]);
   const newIdentity = { name: newAns.newName.trim(), email: newAns.newEmail.trim() };
 
-  // Who is "you"? Auto-match across every signal (new email/name, git config, the
-  // GitHub username, an explicit --me) — email first, then name. If none matches,
-  // never force a wrong pick: offer the list PLUS an explicit "skip" escape.
-  const { emails, names } = youSignals({ newName: newIdentity.name, newEmail: newIdentity.email, gitName, gitEmail, githubUser, me });
-  let you = matchYou({ identities, emails, names });
+  // Who is "you"? Auto-match by EMAIL only (the email you entered or your git
+  // config email) — names coincide too easily to trust. A deliberate `--me "Name"`
+  // may match by name; git/GitHub names never do. If nothing matches we never force
+  // a wrong pick: offer the list PLUS an explicit "skip" escape.
+  const { emails, names } = youSignals({ newEmail: newIdentity.email, gitEmail, me });
+  const meIsName = !!me && !String(me).includes('@');
+  let you = matchYou({ identities, emails, names, allowNameMatch: meIsName });
   if (you) {
     const why = sameCi(you.email, gitEmail) ? 'matches your git config'
       : sameCi(you.email, newIdentity.email) ? 'matches the email you entered'

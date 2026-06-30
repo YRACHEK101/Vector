@@ -4,6 +4,17 @@ All notable changes to `vector-migrate` are documented here. This project follow
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.6.1] - 2026-06-30
+
+### Fixed
+
+- **Contributor identity is now matched by email only — fixing a false positive that suppressed the v2.6.0 auto-skip.** The matcher previously also matched on **name** (a `git config user.name`, a GitHub handle, or the display name you typed). Those aren't stable identifiers — within one company many people share name patterns — so it could decide you *were* a contributor when you weren't: in a real run a user whose email was **not** among the repo's authors was still matched (on a coincidental name), which hid the `❮ None of these — skip ❯` option and the non-interactive auto-skip, and risked silently rewriting **someone else's** commits into your identity.
+  - `matchYou` now matches on **full, exact, case-insensitive email equality** only — never a name, substring, or shared domain (`a@company.com` and `b@company.com` are never treated as the same person).
+  - `youSignals` no longer feeds `gitName`/`githubUser`/the typed `newName` into matching; only the email you enter and your `git config user.email` drive a match.
+  - A name match is still possible, but **only** behind an explicit opt-in — a deliberate `--me "Name"` self-identification — never from automatic git/GitHub signals.
+  - `planIdentityMatch` (the non-interactive/`--force` planner) inherits the fix, so non-contributors now correctly auto-skip.
+- **No change to genuine matches:** when your email equals a detected author's email, the rewrite proceeds exactly as before. New regression tests cover the name-coincidence false positive, exact/case-insensitive email matching, the no-domain-match rule, and the non-interactive skip.
+
 ## [2.6.0] - 2026-06-29
 
 ### Added
