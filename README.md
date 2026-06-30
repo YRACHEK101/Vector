@@ -517,12 +517,14 @@ Changing an author's **name or email necessarily rewrites history** — those co
 
 Identity rewriting only makes sense when **you** are one of the repo's authors. When you migrate a repo you never committed to, none of the detected authors is you — so Vector must **not** force you to pick one (picking any author would rewrite *that* person's commits into your name). Instead it tries to recognise you, and if it can't, it skips rewriting and keeps everyone as-is.
 
-**How Vector matches you** — by **email only**, the one reliable unique identifier. It compares (case-insensitively, full-address equality — never just a shared domain):
+**How Vector matches you** — by **email only**, the one reliable unique identifier (case-insensitively, full-address equality — never just a shared `@company.com` domain, never substring). Vector deliberately does **not** auto-match on names (`git config user.name`, your GitHub username, a typed display name): names coincide far too easily — especially inside one company — and a wrong match would rewrite **someone else's** commits into your identity. (To self-identify by name anyway, pass `--me "Your Name"` — an exact, opt-in match.)
 
-1. the **email** you entered as your new verified email, and
-2. your local `git config user.email`.
+Matches are ranked by **confidence**:
 
-If either equals a detected author's email, Vector selects you automatically and prints a short confirmation (e.g. *"Detected you as … (matches your git config)"*) — **no prompt**. Vector deliberately does **not** auto-match on names (`git config user.name`, your GitHub username, or a typed display name): names coincide far too easily — especially inside one company — and a wrong name match would silently rewrite **someone else's** commits into your identity. If your email isn't among the authors, you're treated as a non-contributor and the skip path runs (below). To self-identify by name anyway, pass it explicitly with `--me "Your Name"`.
+- **Strong — auto-selected, no prompt:** the email you entered as your new verified email, or an explicit `--me <email>`, exactly equals a detected author. This is unambiguously you.
+- **Soft — confirm first:** *only* your ambient `git config user.email` matches an author. That's a real author, but on a **shared or handed-down machine** your git config can belong to a **coworker** — so Vector does **not** select it silently. Interactively it shows the "Which detected author is YOU?" list with that author **pre-selected**, plus the skip option, so a correct identity is one keypress away and a coworker's isn't forced on you. *(Non-interactive / `--force` / CI has no prompt, so it still auto-matches on git config — use `--me`/`--skip-identity` to override on a misconfigured machine.)*
+
+If no author matches your email, you're treated as a non-contributor and the skip path runs (below).
 
 **When no author matches you:**
 
@@ -627,6 +629,9 @@ A pure-Bash implementation (`migrate.sh`, with `tests/run_tests.sh`) is also inc
 ## 📦 Version history
 
 A per-release summary of **features added (✨)** and **issues fixed (🐛)**, newest first. Full detail in [`CHANGELOG.md`](CHANGELOG.md). This project follows [Semantic Versioning](https://semver.org/).
+
+### 2.6.2 — don't let a coworker's git config silently make you "them"
+- 🐛 A match coming **only** from the machine's ambient `git config user.email` is no longer auto-selected silently. On a shared/handed-down machine configured as a teammate, Vector used to announce "Detected you as … (matches your git config)" and proceed; now the interactive wizard **shows the author list (that author pre-selected) with the "None of these — skip" option**, so a wrong machine identity is escapable. The email/`--me` you type still auto-selects silently; `--force`/CI is unchanged.
 
 ### 2.6.1 — match contributor identity by email only
 - 🐛 **Fixes a false-positive match** that wrongly identified non-contributors as you and suppressed the v2.6.0 auto-skip. Vector now matches you by **email only** (exact, case-insensitive — never a shared domain); name-based auto-matching (`git config user.name`, GitHub handle, typed name) is removed because names coincide too easily and could silently rewrite someone else's commits. Genuine email matches are unchanged; self-identify by name with an explicit `--me "Your Name"`.

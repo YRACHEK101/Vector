@@ -69,3 +69,37 @@ test('--me matches by name → auto-selected without prompting', async () => {
   assert.equal(out.entries[0].sourceEmail, 'o@c.com');
   assert.equal(asked.length, 1, 'no "which is you?" prompt when --me resolves it');
 });
+
+// A git config identity that is actually a COWORKER's (shared/handed-down machine):
+// a match driven ONLY by git config must be confirmable — never silently selected.
+const COWORKERS = [
+  { name: 'mahmoud', email: 'mdraoui@liadtech.com' },
+  { name: 'Alice', email: 'alice@a.com' },
+];
+
+test('soft match (git config = a coworker): does NOT auto-select; shows the list + skip', async () => {
+  const { inq, asked } = fakeInquirer([
+    { newName: 'y-rachek', newEmail: 'yrachek@liadtech.com' }, // operator's own email — not an author
+    { youEmail: SKIP_IDENTITY_VALUE },                          // "None of these — skip"
+  ]);
+  const out = await runMappingWizard(COWORKERS, { gitName: 'mahmoud', gitEmail: 'mdraoui@liadtech.com', inquirer: inq });
+  assert.equal(out.skipped, true, 'operator can escape the coworker identity');
+  assert.deepEqual(out.entries, []);
+  // The "which is you?" prompt was shown, pre-selecting the git-config author, with the skip option.
+  assert.equal(asked.length, 2, 'a confirm list prompt appeared (not a silent auto-match)');
+  const list = asked[1][0];
+  assert.equal(list.default, 'mdraoui@liadtech.com', 'git-config author is pre-selected');
+  assert.ok(list.choices.some((ch) => ch && ch.value === SKIP_IDENTITY_VALUE), 'skip option present');
+});
+
+test('soft match: confirming the pre-selected author proceeds with the rewrite', async () => {
+  const { inq } = fakeInquirer([
+    { newName: 'Mahmoud', newEmail: 'mahmoud@users.noreply.github.com' }, // genuinely mahmoud's new email
+    { youEmail: 'mdraoui@liadtech.com' },                                 // yes, that's me
+    { editTeam: false },
+  ]);
+  const out = await runMappingWizard(COWORKERS, { gitName: 'mahmoud', gitEmail: 'mdraoui@liadtech.com', inquirer: inq });
+  assert.equal(out.skipped, false);
+  assert.equal(out.entries[0].sourceEmail, 'mdraoui@liadtech.com');
+  assert.equal(out.entries[0].email, 'mahmoud@users.noreply.github.com');
+});

@@ -45,6 +45,13 @@ test('matchYou: name matching happens only with the explicit opt-in (allowNameMa
   assert.deepEqual(matchYou({ identities: IDS, names: ['MAHMOUD'], allowNameMatch: true }), IDS[1], 'opt-in matches by name');
 });
 
+test('matchYou: name matching is exact — never substring/fuzzy, even when opted in', () => {
+  const ids = [{ name: 'Yahia RACHEK Senior', email: 'a@x.com' }];
+  assert.equal(matchYou({ identities: ids, names: ['Yahia RACHEK'], allowNameMatch: true }), null, 'no substring match');
+  assert.equal(matchYou({ identities: ids, names: ['y-rachek'], allowNameMatch: true }), null);
+  assert.deepEqual(matchYou({ identities: ids, names: ['yahia rachek senior'], allowNameMatch: true }), ids[0], 'exact (case/space-insensitive) matches');
+});
+
 test('matchYou: no email match → null (not a contributor)', () => {
   assert.equal(matchYou({ identities: IDS, emails: ['nobody@nowhere.com'] }), null);
   assert.equal(matchYou({ identities: IDS }), null);

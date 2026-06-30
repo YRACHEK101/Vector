@@ -4,6 +4,16 @@ All notable changes to `vector-migrate` are documented here. This project follow
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.6.2] - 2026-06-30
+
+### Fixed
+
+- **A coworker's git identity on your machine no longer silently makes you "them".** 2.6.1 already matches contributors by exact email only (no domain/substring) — but it still **auto-selected silently** when the match came from the machine's ambient `git config user.email`. On a shared or handed-down machine whose `git config` belongs to a teammate (e.g. `user.name = mahmoud`, `user.email = mdraoui@liadtech.com`, both real authors), Vector would announce "Detected you as mahmoud (matches your git config)" and proceed — even though you entered your *own* new identity and never contributed to the repo, so you never saw the "None of these — skip" option.
+  - Matches are now ranked by **confidence**. A **strong** signal — the new email you typed, or an explicit `--me` — still auto-selects silently. A **soft** signal — *only* your ambient `git config user.email` matched — is **no longer selected silently**: the interactive wizard shows the "Which detected author is YOU?" list with that author **pre-selected**, plus the `❮ None of these — I didn't contribute to this repo (skip identity rewriting) ❯` escape. One keypress confirms a correct machine identity; a wrong (coworker) one is now escapable.
+  - **Non-interactive / `--force` / CI** behaviour is unchanged — it still auto-matches on `git config` (no prompt is available there); use `--me <email>` or `--skip-identity` to override on a misconfigured machine.
+  - Name matching remains opt-in (explicit `--me "Name"`) and **exact** — names are now also whitespace-normalised, so no substring/fuzzy match can sneak in.
+- New tests cover the soft-match confirmation (skip and confirm paths), exact-vs-substring name matching, and the git-config-only case.
+
 ## [2.6.1] - 2026-06-30
 
 ### Fixed

@@ -7,7 +7,7 @@
 // ─────────────────────────────────────────────────────────────────────────────
 import { deriveProjectSlug } from './config.js';
 import { query } from './git.js';
-import { defaultNewIdentity, buildIdentityEntries, myUnifyEmails, matchYou, youSignals } from './team.js';
+import { defaultNewIdentity, buildIdentityEntries, myUnifyEmails, matchYou } from './team.js';
 
 // Sentinel + label for the explicit "I'm not a contributor — skip" escape hatch in
 // the "Which detected author is YOU?" list. The sentinel can't collide with a real
@@ -86,28 +86,48 @@ export async function runMappingWizard(identities = [], opts = {}) {
   ]);
   const newIdentity = { name: newAns.newName.trim(), email: newAns.newEmail.trim() };
 
-  // Who is "you"? Auto-match by EMAIL only (the email you entered or your git
-  // config email) — names coincide too easily to trust. A deliberate `--me "Name"`
-  // may match by name; git/GitHub names never do. If nothing matches we never force
-  // a wrong pick: offer the list PLUS an explicit "skip" escape.
-  const { emails, names } = youSignals({ newEmail: newIdentity.email, gitEmail, me });
-  const meIsName = !!me && !String(me).includes('@');
-  let you = matchYou({ identities, emails, names, allowNameMatch: meIsName });
-  if (you) {
-    const why = sameCi(you.email, gitEmail) ? 'matches your git config'
-      : sameCi(you.email, newIdentity.email) ? 'matches the email you entered'
-        : 'auto-matched';
-    process.stderr.write(`  Detected you as ${you.name} <${you.email}> (${why}).\n`);
-  } else {
-    if (me) process.stderr.write(`  --me "${me}" didn't match any detected author — pick below, or choose “None”.\n`);
+  // Who is "you"? Decide by signal CONFIDENCE (all matching is exact email equality;
+  // names never auto-match — only an explicit --me "Name"):
+  //   • STRONG — the email you typed, or an explicit --me — auto-selects silently.
+  //   • SOFT   — only your ambient `git config user.email` matched. It's a real
+  //              author, but on a shared/handed-down machine it can be a COWORKER's,
+  //              so we never select it silently: show the list with that author
+  //              pre-selected AND the "None of these — skip" escape.
+  //   • neither — show the list with the skip option, no default.
+  const meIsEmail = String(me).includes('@');
+  const meIsName = !!me && !meIsEmail;
+  const strong = matchYou({
+    identities,
+    emails: [newIdentity.email, meIsEmail ? me : ''],
+    names: [meIsName ? me : ''],
+    allowNameMatch: meIsName,
+  });
+  const soft = strong ? null : matchYou({ identities, emails: [gitEmail] });
+
+  const pickFromList = async (defaultEmail) => {
     const { youEmail } = await inquirer.prompt([{
       type: 'list', name: 'youEmail', message: 'Which detected author is YOU?',
+      default: defaultEmail || undefined,
       choices: [
         ...identities.map((id) => ({ name: `${id.name} <${id.email}>`, value: id.email })),
         new inquirer.Separator(),
         { name: SKIP_IDENTITY_LABEL, value: SKIP_IDENTITY_VALUE },
       ],
     }]);
+    return youEmail;
+  };
+
+  let you = strong;
+  if (you) {
+    const why = sameCi(you.email, newIdentity.email) ? 'matches the email you entered' : 'matches --me';
+    process.stderr.write(`  Detected you as ${you.name} <${you.email}> (${why}).\n`);
+  } else {
+    if (soft) {
+      process.stderr.write(`  Your git config identity is ${soft.name} <${soft.email}> — confirm it's you below, or choose “None” if you didn't contribute to this repo.\n`);
+    } else if (me) {
+      process.stderr.write(`  --me "${me}" didn't match any detected author — pick below, or choose “None”.\n`);
+    }
+    const youEmail = await pickFromList(soft ? soft.email : '');
     if (youEmail === SKIP_IDENTITY_VALUE) {
       process.stderr.write('  Skipping identity rewriting — all authors kept unchanged.\n');
       return { entries: [], skipped: true };
