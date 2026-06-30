@@ -15,29 +15,52 @@ test('matchYou: email signal matches (case-insensitive)', () => {
   assert.deepEqual(matchYou({ identities: IDS, emails: ['YRACHEK@LIADTECH.COM'] }), IDS[2]);
 });
 
-test('matchYou: falls back to name when no email matches', () => {
-  assert.deepEqual(matchYou({ identities: IDS, names: ['MAHMOUD'] }), IDS[1]);
+// Authors from the real failure: the user's email is NOT among them, but a
+// git/display name (mahmoud, y-rachek) coincides — the matcher must NOT match.
+const NINE = [
+  { name: 'Abdellah BOUSKRI', email: 'abouskri@liadtech.com' },
+  { name: 'mahmoud', email: 'mdraoui@liadtech.com' },
+  { name: 'Mahmoud DRAOUI', email: 'mdraoui@liadtech.com' },
+  { name: 'Nouhaila LAAOUINA', email: 'nlaaouina@liadtech.com' },
+];
+
+test('matchYou: name matching is OFF by default — a name-only coincidence returns null', () => {
+  // The exact real-world false positive: returns null so the skip path runs.
+  assert.equal(matchYou({ identities: NINE, emails: ['yrachek@liadtech.com'], names: ['y-rachek', 'mahmoud'] }), null);
+  assert.equal(matchYou({ identities: IDS, names: ['MAHMOUD'] }), null, 'a name signal alone never matches by default');
 });
 
-test('matchYou: email takes priority over name', () => {
-  // name signal points at mahmoud, email signal points at Rachek → email wins.
-  const got = matchYou({ identities: IDS, emails: ['yrachek@liadtech.com'], names: ['mahmoud'] });
-  assert.deepEqual(got, IDS[2]);
+test('matchYou: matches on exact, case-insensitive EMAIL', () => {
+  assert.deepEqual(matchYou({ identities: IDS, emails: ['MDRAOUI@LIADTECH.COM'] }), IDS[1]);
+  assert.deepEqual(matchYou({ identities: IDS, emails: ['nope@x.com', 'yrachek@liadtech.com'] }), IDS[2]);
 });
 
-test('matchYou: no signal matches → null (the "not a contributor" case)', () => {
-  assert.equal(matchYou({ identities: IDS, emails: ['nobody@nowhere.com'], names: ['Ghost'] }), null);
+test('matchYou: never matches on a shared domain (full-address equality only)', () => {
+  assert.equal(matchYou({ identities: [{ name: 'A', email: 'a@liadtech.com' }], emails: ['z@liadtech.com'] }), null);
+});
+
+test('matchYou: name matching happens only with the explicit opt-in (allowNameMatch)', () => {
+  // Reserved for a deliberate `--me "Name"` self-identification.
+  assert.equal(matchYou({ identities: IDS, names: ['mahmoud'] }), null, 'off by default');
+  assert.deepEqual(matchYou({ identities: IDS, names: ['MAHMOUD'], allowNameMatch: true }), IDS[1], 'opt-in matches by name');
+});
+
+test('matchYou: no email match → null (not a contributor)', () => {
+  assert.equal(matchYou({ identities: IDS, emails: ['nobody@nowhere.com'] }), null);
   assert.equal(matchYou({ identities: IDS }), null);
   assert.equal(matchYou({ identities: [], emails: ['x@y.com'] }), null);
 });
 
-test('youSignals: routes --me to email vs name by shape, drops blanks', () => {
-  const a = youSignals({ newEmail: 'me@gh.com', gitName: 'Me', me: 'who@team.com' });
-  assert.deepEqual(a.emails.sort(), ['me@gh.com', 'who@team.com']);
-  assert.deepEqual(a.names, ['Me']);
-  const b = youSignals({ me: 'Octocat', githubUser: 'octo' });
+test('youSignals: only trustworthy email signals; names holds an explicit --me name only', () => {
+  const a = youSignals({ newEmail: 'me@gh.com', gitEmail: 'me@corp.com', me: 'who@team.com' });
+  assert.deepEqual(a.emails.sort(), ['me@corp.com', 'me@gh.com', 'who@team.com']);
+  assert.deepEqual(a.names, [], 'an --me address is an email signal, not a name signal');
+  const b = youSignals({ me: 'Octocat' });
   assert.deepEqual(b.emails, []);
-  assert.deepEqual(b.names.sort(), ['Octocat', 'octo']);
+  assert.deepEqual(b.names, ['Octocat'], 'an explicit --me name is the only name signal');
+  // Weak hints (gitName/githubUser/newName) are ignored even if passed (back-compat).
+  const c = youSignals({ newEmail: 'x@y.com', gitName: 'Coincidence', githubUser: 'coincidence' });
+  assert.deepEqual(c.names, [], 'git/GitHub names never become matching signals');
 });
 
 test('planIdentityMatch: matched via --me → builds rewrite entries (no skip)', () => {
@@ -67,6 +90,25 @@ test('planIdentityMatch: bad --me value → skip (never rewrite the wrong person
 test('planIdentityMatch: matched but no usable new identity → skip', () => {
   const plan = planIdentityMatch({ identities: IDS, me: 'mdraoui@liadtech.com' }); // no new name/email
   assert.equal(plan.skip, true);
+});
+
+test('planIdentityMatch: non-contributor with a name coincidence still skips (the real bug)', () => {
+  // gitName "mahmoud" and githubUser "y-rachek" coincide with authors, but the
+  // user's email isn't among them → must skip, not falsely rewrite someone.
+  const plan = planIdentityMatch({
+    identities: NINE, newName: 'y-rachek', newEmail: 'yrachek@liadtech.com', gitName: 'mahmoud', githubUser: 'y-rachek',
+  });
+  assert.equal(plan.skip, true);
+  assert.equal(plan.matched, null);
+  assert.deepEqual(plan.entries, []);
+});
+
+test('planIdentityMatch: a genuine email match (via git config) produces entries', () => {
+  const plan = planIdentityMatch({ identities: IDS, newName: 'Mahmoud', newEmail: 'mahmoud@users.noreply.github.com', gitEmail: 'MDRAOUI@liadtech.com' });
+  assert.equal(plan.skip, false);
+  assert.deepEqual(plan.matched, IDS[1]);
+  assert.ok(plan.entries.length >= 1);
+  assert.equal(plan.entries[0].sourceEmail, 'mdraoui@liadtech.com');
 });
 
 test('config: --skip-identity / --me plumb through env and finalize', () => {
